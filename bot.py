@@ -2,11 +2,12 @@ import os
 import uuid
 import asyncio
 import subprocess
-import json
 import nextcord
 from nextcord.ext import commands
 import yt_dlp
-import websockets
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import urllib.parse
+import threading
 
 DOWNLOAD_DIR = 'downloads'
 
@@ -199,7 +200,7 @@ async def show_queue_ctx(interaction: nextcord.Interaction, member: nextcord.Mem
     else:
         await interaction.response.send_message('Queue is empty')
 
-async def handle_ws_command(cmd: str):
+async def handle_command(cmd: str):
     vc = player.voice_client
     if not vc:
         return
@@ -212,22 +213,27 @@ async def handle_ws_command(cmd: str):
         player.queue.clear()
         player.playlist_songs.clear()
 
-async def ws_listener():
-    url = os.environ.get('WS_SERVER_URL', 'ws://localhost:8080')
-    while True:
-        try:
-            async with websockets.connect(url) as ws:
-                async for message in ws:
-                    try:
-                        data = json.loads(message)
-                        cmd = data.get('cmd')
-                        if cmd:
-                            await handle_ws_command(cmd)
-                    except json.JSONDecodeError:
-                        await handle_ws_command(message)
-        except Exception as e:
-            print(f"WS connection failed: {e}")
-            await asyncio.sleep(5)
+def start_http_server():
+    port = int(os.environ.get('HTTP_CONTROL_PORT', '8080'))
 
-bot.loop.create_task(ws_listener())
+    class ControlHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == '/command':
+                params = urllib.parse.parse_qs(parsed.query)
+                cmd = params.get('cmd', [None])[0]
+                if cmd:
+                    asyncio.run_coroutine_threadsafe(handle_command(cmd), bot.loop)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'OK')
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+    server = HTTPServer(('0.0.0.0', port), ControlHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+start_http_server()
 bot.run(os.environ.get('DISCORD_TOKEN'))
