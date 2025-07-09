@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>MusicBot Control</title>
+  <style>
+    body { margin:0; font-family:sans-serif; background:#111; color:#eee; }
+    header { background:#222; padding:1em; text-align:center; font-size:1.5em; }
+    main { padding:1em; }
+    button { background:#333; color:#eee; border:none; padding:0.5em 1em; margin:0.2em; border-radius:4px; cursor:pointer; }
+    button:hover { background:#444; }
+    input { padding:0.5em; width:70%; margin-right:0.5em; border:1px solid #333; border-radius:4px; }
+    #queue { list-style:none; padding:0; }
+    #queue li { display:flex; justify-content:space-between; padding:0.5em; border-bottom:1px solid #333; }
+    #queue li button { padding:0.2em 0.5em; }
+  </style>
+</head>
+<body>
+  <header>MusicBot Control</header>
+  <main>
+    <div>
+      <button onclick="api('skip')">Skip</button>
+      <button onclick="api('pause')">Pause</button>
+      <button onclick="api('resume')">Resume</button>
+      <button onclick="api('clear')">Clear Queue</button>
+    </div>
+    <div style="margin-top:1em;">
+      <input id="query" placeholder="Song URL or search term">
+      <button onclick="addSong()">Add Song</button>
+    </div>
+    <h3>Queue</h3>
+    <ul id="queue"></ul>
+  </main>
+  <script>
+    const auth = 'Basic ' + btoa(prompt('Username') + ':' + prompt('Password'));
+    async function api(cmd, params='') {
+      await fetch(`/api/${cmd}${params}`, { headers:{ 'Authorization': auth } });
+      loadQueue();
+    }
+    async function addSong() {
+      let q = document.getElementById('query').value.trim();
+      if (!q) return;
+      api('add', '?query=' + encodeURIComponent(q));
+      document.getElementById('query').value = '';
+    }
+    async function removeSong(i) {
+      api('remove', '?pos=' + i);
+    }
+    async function loadQueue() {
+      let res = await fetch('/api/queue', { headers:{ 'Authorization': auth } });
+      let data = await res.json();
+      let ul = document.getElementById('queue');
+      ul.innerHTML = '';
+      data.queue.forEach((t, i) => {
+        let li = document.createElement('li');
+        li.textContent = t;
+        let btn = document.createElement('button');
+        btn.textContent = 'Remove';
+        btn.onclick = () => removeSong(i+1);
+        li.appendChild(btn);
+        ul.appendChild(li);
+      });
+    }
+    loadQueue();
+  </script>
+</body>
+</html>
