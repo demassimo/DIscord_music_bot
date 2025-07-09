@@ -50,9 +50,10 @@ downloads_in_progress: set[str] = set()
 
 # ---- Song & Player ----
 class Song:
-    def __init__(self, title: str, filepath: str):
+    def __init__(self, title: str, filepath: str, query: str):
         self.title = title
         self.filepath = filepath
+        self.query = query
 
 class MusicPlayer:
     def __init__(self):
@@ -71,6 +72,29 @@ class MusicPlayer:
         return song
 
 player = MusicPlayer()
+
+# ---- TTS helper ----
+async def speak(text: str):
+    vc = player.voice_client
+    if not vc:
+        return
+    while vc.is_playing():
+        await asyncio.sleep(0.1)
+    tmp = os.path.join(DOWNLOAD_DIR, f"tts_{uuid.uuid4()}.wav")
+    proc = await asyncio.create_subprocess_exec(
+        'espeak', text, '-w', tmp,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL
+    )
+    await proc.communicate()
+    done = asyncio.Event()
+    src = nextcord.FFmpegPCMAudio(tmp)
+    vc.play(src, after=lambda _: done.set())
+    await done.wait()
+    try:
+        os.remove(tmp)
+    except Exception:
+        pass
 
 # ---- Download logic ----
 async def download_audio(query: str) -> Song:
@@ -99,9 +123,9 @@ async def download_audio(query: str) -> Song:
                 for root, _, files in os.walk(path):
                     for f in files:
                         if f.lower().endswith(('.mp3','.m4a','.flac','.wav','.opus','.ogg')):
-                            return Song(os.path.splitext(f)[0], os.path.join(root, f))
+                            return Song(os.path.splitext(f)[0], os.path.join(root, f), query)
                 raise RuntimeError("spotdl created directory but no audio inside")
-            return Song(os.path.splitext(entry)[0], path)
+            return Song(os.path.splitext(entry)[0], path, query)
 
         # 2) YouTube/URL via yt_dlp Python API in executor
         loop = asyncio.get_event_loop()
@@ -124,7 +148,7 @@ async def download_audio(query: str) -> Song:
         path = os.path.join(DOWNLOAD_DIR, f"{file_id}.{ext}")
         if not os.path.isfile(path):
             raise RuntimeError("yt_dlp finished but file not found on disk")
-        return Song(title, path)
+        return Song(title, path, query)
 
     finally:
         downloads_in_progress.discard(query)
@@ -156,7 +180,7 @@ async def playback_loop(interaction: nextcord.Interaction):
         player.current = song
 
         try:
-            # send opus@64kbps
+            await speak(f"Now playing {song.title}")
             src = nextcord.FFmpegOpusAudio(song.filepath, bitrate=64)
             vc.play(src, after=lambda _: player.play_next.set())
             await interaction.followup.send(f"Now playing: {song.title}")
@@ -195,6 +219,7 @@ async def play(interaction: nextcord.Interaction, query: str):
     await interaction.response.defer()
     try:
         await ensure_voice(interaction)
+        await speak(f"Downloading {query}")
 
         # convert YouTube Music playlist URL
         m = re.search(r'music\.youtube\.com/playlist\?list=([^&]+)', query)
@@ -255,6 +280,19 @@ async def loop(interaction: nextcord.Interaction):
     state = "on" if player.loop else "off"
     await interaction.response.send_message(f"Loop is now {state}")
 
+@bot.slash_command(description='Replay the previous song')
+async def back(interaction: nextcord.Interaction):
+    if len(player.history) < 2:
+        return await interaction.response.send_message("No previous song", ephemeral=True)
+    prev = player.history[-2]
+    if len(player.queue) >= 10:
+        return await interaction.response.send_message("Queue full", ephemeral=True)
+    song = await player.add_song(prev.query)
+    player.queue.insert(0, song)
+    await interaction.response.send_message(f"Replaying {song.title}")
+    if not interaction.guild.voice_client.is_playing():
+        bot.loop.create_task(playback_loop(interaction))
+
 @bot.slash_command(description='Show the queue')
 async def queue(interaction: nextcord.Interaction):
     if not player.queue:
@@ -305,6 +343,20 @@ async def handle_command(cmd: str):
             except: pass
         player.queue.clear()
 
+INDEX_HTML = """<!DOCTYPE html>
+<html>
+<head><meta charset='utf-8'><title>MusicBot</title></head>
+<body>
+<h1>MusicBot Control</h1>
+<button onclick=\"cmd('skip')\">Skip</button>
+<button onclick=\"cmd('clear')\">Clear Queue</button>
+<script>
+function cmd(c){ fetch('/command?cmd='+c).then(r=>r.text()).then(alert); }
+</script>
+</body>
+</html>
+"""
+
 def start_http_server():
     class AuthHandler(BaseHTTPRequestHandler):
         def do_AUTHHEAD(self):
@@ -313,6 +365,12 @@ def start_http_server():
             self.send_header("Content-type", "text/plain")
             self.end_headers()
         def do_GET(self):
+            if self.path == "/":
+                self.send_response(200)
+                self.send_header("Content-type", "text/html")
+                self.end_headers()
+                self.wfile.write(INDEX_HTML.encode())
+                return
             auth = self.headers.get("Authorization")
             if not auth or not auth.startswith("Basic "):
                 return self.do_AUTHHEAD()
@@ -349,4 +407,8 @@ async def on_application_command_error(interaction, error):
 if __name__ == "__main__":
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     start_http_server()
-    bot.run('MTM5MjYyNDI5MjIredated3V6SkQwN1t3KJvgEo6fk')
+    token = os.environ.get('DISCORD_TOKEN')
+    if not token:
+        log.error('DISCORD_TOKEN environment variable not set')
+        sys.exit(1)
+    bot.run(token)

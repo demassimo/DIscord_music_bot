@@ -1,6 +1,6 @@
 # Discord Music Bot
 
-This bot uses Nextcord application commands to play music from YouTube, YouTube Music, and Spotify. Songs and playlists are downloaded with `yt-dlp` and `spotdl`. Commands can also be issued over a simple HTTP endpoint instead of using WebSockets.
+This bot uses Nextcord application commands to play music from YouTube, YouTube Music, and Spotify. Songs and playlists are downloaded with `yt-dlp` and `spotdl`. Commands can also be issued over a simple HTTP endpoint. A minimal web page is served directly from the bot for basic control.
 
 ## Features
 
@@ -12,6 +12,7 @@ This bot uses Nextcord application commands to play music from YouTube, YouTube 
 - `/loop` – toggle loop mode for the current song
 - `/back` – replay the previous song
 - `/queue` – display queued tracks
+- The bot speaks events like downloads and currently playing tracks using TTS
 - **Show Queue** context command via the Apps menu when right clicking the bot
 
 After a song finishes playing it is removed from disk. The queue is limited to 10 entries.
@@ -22,6 +23,7 @@ After a song finishes playing it is removed from disk. The queue is limited to 1
    ```bash
    pip install nextcord yt-dlp spotdl
    ```
+   The bot also requires `ffmpeg` and `espeak` installed on the system.
 2. Set the `DISCORD_TOKEN` environment variable with your bot token.
 3. Ensure `ffmpeg` is installed and in your PATH.
 4. Run the bot:
@@ -31,6 +33,6 @@ After a song finishes playing it is removed from disk. The queue is limited to 1
 
    A sample `discord_music_bot.service` is provided for running with `systemctl`.
 
-The bot exposes an HTTP control server on port `8080` by default. Set `HTTP_CONTROL_PORT` to change the port.
+The bot exposes an HTTP control server on port `8080` by default. Browse to `http://localhost:8080/` for a small control page. Set `HTTP_CONTROL_PORT` to change the port.
 
 Spotify downloads require a configured `spotdl` installation and may need Spotify credentials. See [spotdl documentation](https://github.com/spotDL/spotify-downloader) for setup details.
