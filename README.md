@@ -1,6 +1,6 @@
 # Discord Music Bot
 
-This bot uses Nextcord application commands to play music from YouTube, YouTube Music, and Spotify. Songs and playlists are downloaded with `yt-dlp` and `spotdl`. It can also listen for commands from a small WebSocket server.
+This bot uses Nextcord application commands to play music from YouTube, YouTube Music, and Spotify. Songs and playlists are downloaded with `yt-dlp` and `spotdl`. Commands can also be issued over a simple HTTP endpoint instead of using WebSockets.
 
 ## Features
 
@@ -20,24 +20,17 @@ After a song finishes playing it is removed from disk. The queue is limited to 1
 
 1. Install dependencies:
    ```bash
-   pip install nextcord yt-dlp spotdl websockets
+   pip install nextcord yt-dlp spotdl
    ```
 2. Set the `DISCORD_TOKEN` environment variable with your bot token.
 3. Ensure `ffmpeg` is installed and in your PATH.
-4. (Optional) start the PHP WebSocket server which will also launch `bot.py`:
-   ```bash
-   composer require cboden/ratchet
-   php ws_server.php
-   ```
-   The server relays commands over WebSockets and automatically starts the bot.
-
-5. Alternatively run the bot directly:
+4. Run the bot:
    ```bash
    python bot.py
    ```
 
    A sample `discord_music_bot.service` is provided for running with `systemctl`.
 
-Set `WS_SERVER_URL` if the server is hosted elsewhere (default `ws://localhost:8080`).
+The bot exposes an HTTP control server on port `8080` by default. Set `HTTP_CONTROL_PORT` to change the port.
 
 Spotify downloads require a configured `spotdl` installation and may need Spotify credentials. See [spotdl documentation](https://github.com/spotDL/spotify-downloader) for setup details.
