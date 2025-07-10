@@ -7,6 +7,8 @@ import logging
 import base64
 import re
 import json
+import subprocess
+import time
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
@@ -52,19 +54,23 @@ downloads_in_progress: dict[str, datetime] = {}
 
 # ---- Song & Player ----
 class Song:
-    def __init__(self, title: str, filepath: str, query: str):
+    def __init__(self, title: str, filepath: str, query: str, duration: float = 0.0):
         self.title = title
         self.filepath = filepath
         self.query = query
+        self.duration = duration  # seconds
 
 class MusicPlayer:
     def __init__(self):
         self.queue: list[Song] = []
         self.history: list[Song] = []
         self.loop = False
+        self.loop_queue = False
         self.play_next = asyncio.Event()
         self.voice_client: nextcord.VoiceClient | None = None
         self.current: Song | None = None
+        self.start_time: float = 0.0
+        self.seek_pos: float | None = None
 
     async def add_song(self, query: str) -> Song:
         if len(self.queue) >= 10:
@@ -149,6 +155,18 @@ async def speak(text: str):
         pass
 
 # ---- Download logic ----
+def get_audio_duration(path: str) -> float:
+    """Return audio duration in seconds using ffprobe."""
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+             '-of', 'default=noprint_wrappers=1:nokey=1', path],
+            capture_output=True, text=True, check=True
+        )
+        return float(result.stdout.strip())
+    except Exception:
+        return 0.0
+
 async def download_audio(query: str) -> Song:
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     downloads_in_progress[query] = datetime.now()
@@ -173,9 +191,10 @@ async def download_audio(query: str) -> Song:
                 for root, _, files in os.walk(path):
                     for f in files:
                         if f.lower().endswith(('.mp3','.m4a','.flac','.wav','.opus','.ogg')):
-                            return Song(os.path.splitext(f)[0], os.path.join(root, f), query)
+                            dur = get_audio_duration(os.path.join(root, f))
+                            return Song(os.path.splitext(f)[0], os.path.join(root, f), query, dur)
                 raise RuntimeError("spotdl created directory but no audio inside")
-            return Song(os.path.splitext(entry)[0], path, query)
+            return Song(os.path.splitext(entry)[0], path, query, get_audio_duration(path))
 
         # YouTube/other via yt_dlp Python API
         loop = asyncio.get_event_loop()
@@ -191,12 +210,15 @@ async def download_audio(query: str) -> Song:
         file_id = info.get('id')
         ext     = info.get('ext')
         title   = info.get('title', 'Unknown')
+        duration = info.get('duration') or 0
         if not file_id or not ext:
             raise RuntimeError("yt_dlp did not return valid id/ext")
         path = os.path.join(DOWNLOAD_DIR, f"{file_id}.{ext}")
         if not os.path.isfile(path):
             raise RuntimeError("yt_dlp finished but file not found on disk")
-        return Song(title, path, query)
+        if not duration:
+            duration = get_audio_duration(path)
+        return Song(title, path, query, duration)
     finally:
         downloads_in_progress.pop(query, None)
 
@@ -223,6 +245,10 @@ async def handle_command(cmd: str):
         vc.pause()
     elif cmd == 'resume' and vc.is_paused():
         vc.resume()
+    elif cmd == 'loop':
+        player.loop = not player.loop
+    elif cmd == 'loopqueue':
+        player.loop_queue = not player.loop_queue
     elif cmd == 'clear':
         for s in list(player.queue):
             try: os.remove(s.filepath)
@@ -329,6 +355,11 @@ async def loop(interaction: nextcord.Interaction):
     player.loop = not player.loop
     await interaction.response.send_message(f" Loop is now **{'on' if player.loop else 'off'}**")
 
+@bot.slash_command(description='Toggle queue loop mode')
+async def loopqueue(interaction: nextcord.Interaction):
+    player.loop_queue = not player.loop_queue
+    await interaction.response.send_message(f" Queue loop is now **{'on' if player.loop_queue else 'off'}**")
+
 @bot.slash_command(description='Replay the previous song')
 async def back(interaction: nextcord.Interaction):
     if len(player.history) < 2:
@@ -379,6 +410,7 @@ async def playback_loop(interaction: nextcord.Interaction | None = None):
         song = player.queue.pop(0)
         player.history.append(song)
         player.current = song
+        player.start_time = time.time()
         try:
             await speak(f"Now playing {song.title}")
             bit = channel_bitrate()
@@ -395,9 +427,32 @@ async def playback_loop(interaction: nextcord.Interaction | None = None):
             log.error(f"Playback error for {song.title}: {e}")
             continue
         await player.play_next.wait()
+        if player.seek_pos is not None:
+            pos = player.seek_pos
+            player.seek_pos = None
+            player.start_time = time.time() - pos
+            try:
+                bit = channel_bitrate()
+                src = await nextcord.FFmpegOpusAudio.from_probe(
+                    song.filepath,
+                    method='fallback',
+                    bitrate=bit,
+                    before_options=f'-ss {pos}',
+                    opus_options='-application audio -compression_level 10 -vbr on -frame_duration 60'
+                )
+                vc.play(src, after=lambda _: player.play_next.set())
+            except Exception as e:
+                log.error(f'Seek error: {e}')
+                player.play_next.set()
+            await player.play_next.wait()
         if not player.loop:
-            try: os.remove(song.filepath)
-            except: pass
+            if player.loop_queue:
+                player.queue.append(song)
+            else:
+                try:
+                    os.remove(song.filepath)
+                except Exception:
+                    pass
         else:
             player.queue.insert(0, song)
 
@@ -408,9 +463,9 @@ def start_http_server():
     class AuthHandler(BaseHTTPRequestHandler):
         def do_AUTHHEAD(self):
             self.send_response(401)
-            self.send_header('WWW-Authenticate','Basic realm="MusicBot"')
-            self.send_header('Content-type','text/plain')
+            self.send_header('Content-type','application/json')
             self.end_headers()
+            self.wfile.write(b'{"error":"auth"}')
 
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
@@ -441,7 +496,7 @@ def start_http_server():
             cmd = parsed.path[len('/api/'):]
             params = urllib.parse.parse_qs(parsed.query)
 
-            if cmd in ('skip','stop','pause','resume','clear'):
+            if cmd in ('skip','stop','pause','resume','clear','loop','loopqueue'):
                 asyncio.run_coroutine_threadsafe(handle_command(cmd), bot.loop)
             elif cmd == 'add' and 'query' in params:
                 q = params['query'][0]
@@ -458,6 +513,13 @@ def start_http_server():
                     asyncio.run_coroutine_threadsafe(join_channel(chan), bot.loop)
                 except:
                     pass
+            elif cmd == 'seek' and 'pos' in params:
+                try:
+                    player.seek_pos = float(params['pos'][0])
+                    if player.voice_client:
+                        player.voice_client.stop()
+                except Exception:
+                    pass
             elif cmd == 'queue':
                 pass
             else:
@@ -465,7 +527,11 @@ def start_http_server():
 
             resp = {
                 'current': player.current.title if player.current else None,
-                'queue': [s.title for s in player.queue]
+                'queue': [s.title for s in player.queue],
+                'loop': player.loop,
+                'loop_queue': player.loop_queue,
+                'duration': player.current.duration if player.current else 0,
+                'position': time.time() - player.start_time if player.current else 0,
             }
             resp['downloads'] = {
                 q: int((datetime.now() - t).total_seconds())
