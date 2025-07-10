@@ -1,156 +1,261 @@
+
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <title>MusicBot Control</title>
+
+  <!-- Google Fonts & Material Icons (like YouTube) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/icon?family=Material+Icons|Material+Icons+Outlined" rel="stylesheet">
+
   <style>
-    body {
-      margin:0;
-      font-family:Roboto, Arial, sans-serif;
-      background:#181818;
-      color:#eee;
+    :root{
+      --yt-bg:#181818;
+      --yt-surface:#202020;
+      --yt-surface-hover:#2a2a2a;
+      --yt-primary:#ffffff;
+      --yt-secondary:#aaaaaa;
+      --yt-accent:#ff0000;
     }
-    header {
-      background:#202020;
-      padding:1em;
-      text-align:center;
-      font-size:1.8em;
-      color:#fff;
-    }
-    main { padding:1em; max-width:800px; margin:0 auto; }
-    button {
-      background:#333;
-      color:#eee;
-      border:none;
-      padding:0.5em 1em;
-      margin:0.2em;
-      border-radius:4px;
-      cursor:pointer;
-    }
-    button:hover { background:#ff0000; }
-    input {
-      padding:0.5em;
-      width:70%;
-      margin-right:0.5em;
-      border:1px solid #333;
-      border-radius:4px;
-    }
-    #queue { list-style:none; padding:0; }
-    #queue li {
+
+    *{box-sizing:border-box;margin:0;padding:0;font-family:Roboto,Arial,sans-serif;}
+
+    body{background:var(--yt-bg);color:var(--yt-primary);line-height:1.5;}
+
+    /* HEADER */
+    header{
       display:flex;
-      justify-content:space-between;
-      padding:0.5em;
-      border-bottom:1px solid #333;
+      align-items:center;
+      gap:.75rem;
+      height:56px;
+      padding:0 1rem;
+      background:var(--yt-surface);
+      border-bottom:1px solid #000;
     }
-    #queue li button { padding:0.2em 0.5em; }
+    header .logo{
+      font-size:1.6rem;
+      font-weight:500;
+      color:var(--yt-accent);
+    }
+    header h1{
+      font-size:1.1rem;
+      font-weight:500;
+      color:var(--yt-primary);
+    }
+
+    main{
+      max-width:960px;
+      margin:1.5rem auto;
+      padding:0 1rem;
+    }
+
+    /* CONTROLS */
+    .control-row{display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:1rem;}
+    .yt-btn{
+      display:inline-flex;
+      align-items:center;
+      gap:.4rem;
+      background:var(--yt-surface);
+      color:var(--yt-primary);
+      border:none;
+      border-radius:2px;
+      padding:.6rem 1.1rem;
+      font-size:.9rem;
+      cursor:pointer;
+      transition:background .15s;
+    }
+    .yt-btn:hover{background:var(--yt-surface-hover);}
+    .yt-btn:active{background:var(--yt-accent);color:#fff;}
+
+    /* INPUTS */
+    .yt-input{
+      background:var(--yt-surface);
+      color:var(--yt-primary);
+      border:1px solid #303030;
+      border-radius:2px;
+      padding:.55rem .75rem;
+      width:70%;
+    }
+    select.yt-input{width:auto;}
+
+    /* STATUS + QUEUE */
+    #status{margin:.8rem 0;color:var(--yt-secondary);font-size:.9rem;}
+    #queue{list-style:none;border:1px solid #303030;border-radius:2px;overflow:hidden;}
+    #queue li{
+      display:flex;justify-content:space-between;align-items:center;
+      padding:.6rem .8rem;
+      background:var(--yt-surface);
+      border-top:1px solid #303030;
+      font-size:.92rem;
+    }
+    #queue li:first-child{border-top:none;}
+    #queue li:nth-child(odd){background:#1f1f1f;}
+    #queue li button{padding:.3rem .6rem;font-size:.8rem;}
+
+    /* PROGRESS (YouTube-style slider) */
+    #progress{
+      -webkit-appearance:none;width:100%;margin:.3rem 0;
+      background:transparent;height:8px;cursor:pointer;
+    }
+    #progress:focus{outline:none;}
+    #progress::-webkit-slider-runnable-track{
+      height:8px;border-radius:4px;background:#404040;
+    }
+    #progress::-webkit-slider-thumb{
+      -webkit-appearance:none;width:8px;height:8px;
+      background:var(--yt-accent);border-radius:50%;margin-top:-0px;
+    }
+    #progress::-moz-range-track{height:8px;border-radius:4px;background:#404040;}
+    #progress::-moz-range-thumb{width:8px;height:8px;background:var(--yt-accent);border:none;border-radius:50%;}
+
+    /* LOGIN OVERLAY */
+    #login{
+      position:fixed;inset:0;display:none;align-items:center;justify-content:center;
+      background:rgba(0,0,0,.8);z-index:100;
+    }
+    #login .card{
+      background:var(--yt-surface);padding:2rem;border-radius:4px;width:280px;text-align:center;
+    }
+    #login h2{margin-bottom:1rem;font-weight:500;font-size:1.25rem;}
   </style>
 </head>
 <body>
-  <header>MusicBot Control</header>
-  <div id="login" style="position:fixed;top:0;left:0;width:100%;height:100%;display:none;align-items:center;justify-content:center;background:#111;z-index:10;">
-    <div style="background:#222;padding:2em;border-radius:8px;text-align:center;">
-      <h2>Login</h2>
-      <input id="user" placeholder="Username" style="width:100%;margin-bottom:0.5em;"><br>
-      <input id="pass" placeholder="Password" type="password" style="width:100%;margin-bottom:0.5em;"><br>
-      <button onclick="doLogin()">Login</button>
+  <header>
+    <span class="material-icons" style="font-size:28px;color:var(--yt-accent);">play_circle_filled</span>
+    <span class="logo">MusicBot</span>
+    <h1>Control Panel</h1>
+  </header>
+
+  <!-- LOGIN MODAL -->
+  <div id="login">
+    <div class="card">
+      <h2>Sign in</h2>
+      <input id="user" class="yt-input" placeholder="Username" style="width:100%;margin-bottom:.6rem;"><br>
+      <input id="pass" class="yt-input" type="password" placeholder="Password" style="width:100%;margin-bottom:1rem;"><br>
+      <button class="yt-btn" onclick="doLogin()">Login</button>
     </div>
   </div>
+
   <main>
-    <div>
-      <button onclick="api('skip')">Skip</button>
-      <button onclick="api('pause')">Pause</button>
-      <button onclick="api('resume')">Resume</button>
-      <button onclick="api('clear')">Clear Queue</button>
-      <button onclick="api('loop')">Loop Song</button>
-      <button onclick="api('loopqueue')">Loop Queue</button>
+    <!-- TOP CONTROLS -->
+    <div class="control-row">
+      <button class="yt-btn" onclick="api('skip')"><span class="material-icons-outlined">skip_next</span>Skip</button>
+      <button class="yt-btn" onclick="api('pause')"><span class="material-icons-outlined">pause</span>Pause</button>
+      <button class="yt-btn" onclick="api('resume')"><span class="material-icons-outlined">play_arrow</span>Resume</button>
+      <button class="yt-btn" onclick="api('clear')">Clear Queue</button>
+      <button class="yt-btn" onclick="api('loop')">Loop Song</button>
+      <button class="yt-btn" onclick="api('loopqueue')">Loop Queue</button>
     </div>
-    <div style="margin-top:1em;">
-      <input id="query" placeholder="Song URL or search term">
-      <button onclick="addSong()">Add Song</button>
+
+    <!-- ADD SONG -->
+    <div class="control-row">
+      <input id="query" class="yt-input" placeholder="YouTube link or search term">
+      <button class="yt-btn" onclick="addSong()">Add</button>
     </div>
-    <div style="margin-top:1em;">
-      <select id="channels"></select>
-      <button onclick="joinChannel()">Join</button>
+
+    <!-- JOIN CHANNEL -->
+    <div class="control-row">
+      <select id="channels" class="yt-input"></select>
+      <button class="yt-btn" onclick="joinChannel()">Join Channel</button>
     </div>
-    <div id="status" style="margin-top:1em;"></div>
-    <div style="margin-top:0.5em;">
-      <input type="range" id="progress" value="0" min="0" max="0" step="1" style="width:80%;">
+
+    <!-- STATUS & PROGRESS -->
+    <div id="status"></div>
+    <input type="range" id="progress" value="0" min="0" max="0" step="1">
+    <div style="text-align:right;font-size:.85rem;color:var(--yt-secondary);margin-bottom:1rem;">
       <span id="time">0:00 / 0:00</span>
     </div>
-    <h3>Queue</h3>
+
+    <!-- QUEUE -->
+    <h3 style="margin:.6rem 0 .4rem;">Up Next</h3>
     <ul id="queue"></ul>
   </main>
+
+  <!-- API JS (unchanged logic, minor tweaks) -->
   <script>
     let auth = localStorage.getItem('auth') || '';
-    function showLogin(show=true) {
-      document.getElementById('login').style.display = show ? 'flex' : 'none';
-    }
-    function doLogin() {
-      const u = document.getElementById('user').value;
-      const p = document.getElementById('pass').value;
-      auth = 'Basic ' + btoa(`${u}:${p}`);
-      localStorage.setItem('auth', auth);
+    const showLogin = (show=true)=>document.getElementById('login').style.display = show ? 'flex' : 'none';
+
+    function doLogin(){
+      const u=document.getElementById('user').value;
+      const p=document.getElementById('pass').value;
+      auth='Basic '+btoa(`${u}:${p}`);
+      localStorage.setItem('auth',auth);
       showLogin(false);
       loadQueue();
     }
-    if (!auth) showLogin(true);
-    async function api(cmd, params='') {
-      let res = await fetch(`/api/${cmd}${params}`, { headers:{ 'Authorization': auth } });
-      if (res.status === 401) { showLogin(true); return; }
+    if(!auth) showLogin(true);
+
+    async function api(cmd,params=''){
+      const res=await fetch(`/api/${cmd}${params}`,{headers:{Authorization:auth}});
+      if(res.status===401){showLogin(true);return;}
       await loadQueue();
     }
-    async function addSong() {
-      let q = document.getElementById('query').value.trim();
-      if (!q) return;
-      api('add', '?query=' + encodeURIComponent(q));
-      document.getElementById('query').value = '';
+    function addSong(){
+      const q=document.getElementById('query').value.trim();
+      if(!q)return;
+      api('add','?query='+encodeURIComponent(q));
+      document.getElementById('query').value='';
     }
-    async function removeSong(i) {
-      api('remove', '?pos=' + i);
-    }
-    async function loadQueue() {
-      let res = await fetch('/api/queue', { headers:{ 'Authorization': auth } });
-      if (res.status === 401) { showLogin(true); return; }
-      let data = await res.json();
-      let ul = document.getElementById('queue');
-      ul.innerHTML = '';
-      data.queue.forEach((t, i) => {
-        let li = document.createElement('li');
-        li.textContent = t;
-        let btn = document.createElement('button');
-        btn.textContent = 'Remove';
-        btn.onclick = () => removeSong(i+1);
+    function removeSong(i){api('remove','?pos='+i);}
+
+    async function loadQueue(){
+      const res=await fetch('/api/queue',{headers:{Authorization:auth}});
+      if(res.status===401){showLogin(true);return;}
+      const data=await res.json();
+
+      /* Populate queue */
+      const ul=document.getElementById('queue');
+      ul.innerHTML='';
+      data.queue.forEach((t,i)=>{
+        const li=document.createElement('li');
+        li.textContent=t;
+        const btn=document.createElement('button');
+        btn.className='yt-btn';
+        btn.style.fontSize='0.75rem';
+        btn.textContent='Remove';
+        btn.onclick=()=>removeSong(i+1);
         li.appendChild(btn);
         ul.appendChild(li);
       });
-      let sel = document.getElementById('channels');
-      sel.innerHTML = '';
-      Object.entries(data.channels).forEach(([id, name]) => {
-        let opt = document.createElement('option');
-        opt.value = id;
-        opt.textContent = name;
-        sel.appendChild(opt);
+
+      /* Channels */
+      const sel=document.getElementById('channels');
+      sel.innerHTML='';
+      Object.entries(data.channels).forEach(([id,name])=>{
+        const opt=document.createElement('option');
+        opt.value=id;opt.textContent=name;sel.appendChild(opt);
       });
-      if (data.connected) sel.value = Object.keys(data.channels).find(k => data.channels[k] === data.connected) || '';
-      let status = document.getElementById('status');
-      let dls = Object.entries(data.downloads).map(([q,s]) => `${q} (${s}s)`).join('<br>');
-      status.innerHTML = `Playing: ${data.current || 'none'}<br>Voice: ${data.connected || 'none'}<br>Downloading:<br>${dls || 'none'}`;
-      let prog = document.getElementById('progress');
-      let time = document.getElementById('time');
-      prog.max = Math.floor(data.duration || 0);
-      prog.value = Math.floor(data.position || 0);
-      function fmt(t){let m=Math.floor(t/60);let s=Math.floor(t%60);return `${m}:${s.toString().padStart(2,'0')}`;}
-      time.textContent = `${fmt(data.position)} / ${fmt(data.duration)}`;
+      if(data.connected) sel.value=Object.keys(data.channels).find(k=>data.channels[k]===data.connected)||'';
+
+      /* Status */
+      const dls=Object.entries(data.downloads).map(([q,s])=>`${q} (${s}s)`).join('<br>');
+      document.getElementById('status').innerHTML=
+        `Playing: <strong>${data.current||'none'}</strong><br>`+
+        `Voice: ${data.connected||'none'}<br>`+
+        `Downloading:<br>${dls||'none'}`;
+
+      /* Progress */
+      const prog=document.getElementById('progress');
+      const time=document.getElementById('time');
+      prog.max=Math.floor(data.duration||0);
+      prog.value=Math.floor(data.position||0);
+      const fmt=t=>{const m=Math.floor(t/60),s=Math.floor(t%60).toString().padStart(2,'0');return `${m}:${s}`;};
+      time.textContent=`${fmt(data.position)} / ${fmt(data.duration)}`;
     }
-    async function joinChannel() {
-      let id = document.getElementById('channels').value;
-      if (id) await api('join', '?channel=' + id);
+
+    function joinChannel(){
+      const id=document.getElementById('channels').value;
+      if(id) api('join','?channel='+id);
     }
-    document.getElementById('progress').addEventListener('change', e => {
-      api('seek', '?pos=' + e.target.value);
+    document.getElementById('progress').addEventListener('change',e=>{
+      api('seek','?pos='+e.target.value);
     });
-    loadQueue();
-    setInterval(loadQueue, 1000);
+
+    loadQueue();setInterval(loadQueue,1000);
   </script>
 </body>
 </html>
