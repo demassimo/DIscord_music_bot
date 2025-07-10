@@ -51,6 +51,8 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # ---- Shared state ----
 downloads_in_progress: dict[str, datetime] = {}
+last_channel_id: int | None = None
+playback_task: asyncio.Task | None = None
 
 # ---- Song & Player ----
 class Song:
@@ -83,8 +85,19 @@ async def add_and_play(query: str):
     """Queue a song and start playback if idle."""
     song = await player.add_song(query)
     vc = player.voice_client
-    if vc and not vc.is_playing():
-        bot.loop.create_task(playback_loop(None))
+    if not vc or not vc.is_connected():
+        if last_channel_id is not None:
+            await join_channel(last_channel_id)
+            vc = player.voice_client
+        else:
+            channels = list_voice_channels()
+            if channels:
+                first_id = next(iter(channels.keys()))
+                await join_channel(first_id)
+                vc = player.voice_client
+    global playback_task
+    if not playback_task or playback_task.done():
+        playback_task = bot.loop.create_task(playback_loop(None))
     return song
 
 player = MusicPlayer()
@@ -122,6 +135,8 @@ async def join_channel(channel_id: int):
         player.voice_client = vc
     else:
         player.voice_client = await channel.connect()
+    global last_channel_id
+    last_channel_id = channel_id
 
 # ---- TTS helper (gTTS) ----
 async def speak(text: str):
@@ -141,11 +156,10 @@ async def speak(text: str):
         return
     done = asyncio.Event()
     bit = channel_bitrate()
-    src = await nextcord.FFmpegOpusAudio.from_probe(
+    src = nextcord.FFmpegOpusAudio(
         tts_mp3,
-        method='fallback',
         bitrate=bit,
-        opus_options='-application audio -compression_level 10 -vbr on -frame_duration 60'
+        options='-application audio -compression_level 10 -vbr on -frame_duration 60'
     )
     vc.play(src, after=lambda _: done.set())
     await done.wait()
@@ -232,6 +246,8 @@ async def ensure_voice(interaction: nextcord.Interaction) -> nextcord.VoiceClien
         raise RuntimeError("You must be in a voice channel.")
     vc = await interaction.user.voice.channel.connect()
     player.voice_client = vc
+    global last_channel_id
+    last_channel_id = interaction.user.voice.channel.id
     return vc
 
 # ---- Command handler ----
@@ -280,6 +296,8 @@ async def leave(interaction: nextcord.Interaction):
     if vc and vc.is_connected():
         await vc.disconnect()
         player.current = None
+        global playback_task
+        playback_task = None
         await interaction.response.send_message(" Left the voice channel")
     else:
         await interaction.response.send_message("Not in a voice channel", ephemeral=True)
@@ -324,8 +342,10 @@ async def play(interaction: nextcord.Interaction, query: str):
             song = await player.add_song(query)
             await interaction.followup.send(f" Added **{song.title}** to the queue")
 
-        if not interaction.guild.voice_client.is_playing():
-            bot.loop.create_task(playback_loop(interaction))
+        global playback_task
+        vc = interaction.guild.voice_client
+        if vc and (not playback_task or playback_task.done()):
+            playback_task = bot.loop.create_task(playback_loop(interaction))
 
     except Exception as e:
         await interaction.followup.send(str(e), ephemeral=True)
@@ -370,8 +390,10 @@ async def back(interaction: nextcord.Interaction):
     song = await player.add_song(prev.query)
     player.queue.insert(0, song)
     await interaction.response.send_message(f" Replaying **{song.title}**")
-    if not interaction.guild.voice_client.is_playing():
-        bot.loop.create_task(playback_loop(interaction))
+    global playback_task
+    vc = interaction.guild.voice_client
+    if vc and (not playback_task or playback_task.done()):
+        playback_task = bot.loop.create_task(playback_loop(interaction))
 
 @bot.slash_command(description='Show the queue')
 async def show_queue(interaction: nextcord.Interaction):
@@ -397,64 +419,67 @@ async def status(interaction: nextcord.Interaction):
 
 # ---- Playback loop ----
 async def playback_loop(interaction: nextcord.Interaction | None = None):
+    global playback_task
     vc = player.voice_client
     if not vc:
+        playback_task = None
         return
-    while True:
-        if not vc.is_connected():
-            break
-        player.play_next.clear()
-        if not player.queue:
-            await asyncio.sleep(1)
-            continue
-        song = player.queue.pop(0)
-        player.history.append(song)
-        player.current = song
-        player.start_time = time.time()
-        try:
-            await speak(f"Now playing {song.title}")
-            bit = channel_bitrate()
-            src = await nextcord.FFmpegOpusAudio.from_probe(
-                song.filepath,
-                method='fallback',
-                bitrate=bit,
-                opus_options='-application audio -compression_level 10 -vbr on -frame_duration 60'
-            )
-            vc.play(src, after=lambda _: player.play_next.set())
-            if interaction:
-                await interaction.followup.send(f" Now playing **{song.title}**")
-        except Exception as e:
-            log.error(f"Playback error for {song.title}: {e}")
-            continue
-        await player.play_next.wait()
-        if player.seek_pos is not None:
-            pos = player.seek_pos
-            player.seek_pos = None
-            player.start_time = time.time() - pos
+    try:
+        while True:
+            if not vc.is_connected():
+                break
+            player.play_next.clear()
+            if not player.queue:
+                await asyncio.sleep(1)
+                continue
+            song = player.queue.pop(0)
+            player.history.append(song)
+            player.current = song
+            player.start_time = time.time()
             try:
+                await speak(f"Now playing {song.title}")
                 bit = channel_bitrate()
-                src = await nextcord.FFmpegOpusAudio.from_probe(
+                src = nextcord.FFmpegOpusAudio(
                     song.filepath,
-                    method='fallback',
                     bitrate=bit,
-                    before_options=f'-ss {pos}',
-                    opus_options='-application audio -compression_level 10 -vbr on -frame_duration 60'
+                    options='-application audio -compression_level 10 -vbr on -frame_duration 60'
                 )
                 vc.play(src, after=lambda _: player.play_next.set())
+                if interaction:
+                    await interaction.followup.send(f" Now playing **{song.title}**")
             except Exception as e:
-                log.error(f'Seek error: {e}')
-                player.play_next.set()
+                log.error(f"Playback error for {song.title}: {e}")
+                continue
             await player.play_next.wait()
-        if not player.loop:
-            if player.loop_queue:
-                player.queue.append(song)
-            else:
+            if player.seek_pos is not None:
+                pos = player.seek_pos
+                player.seek_pos = None
+                player.start_time = time.time() - pos
                 try:
-                    os.remove(song.filepath)
-                except Exception:
-                    pass
-        else:
-            player.queue.insert(0, song)
+                    bit = channel_bitrate()
+                    src = nextcord.FFmpegOpusAudio(
+                        song.filepath,
+                        bitrate=bit,
+                        before_options=f'-ss {pos}',
+                        options='-application audio -compression_level 10 -vbr on -frame_duration 60'
+                    )
+                    vc.play(src, after=lambda _: player.play_next.set())
+                except Exception as e:
+                    log.error(f'Seek error: {e}')
+                    player.play_next.set()
+                await player.play_next.wait()
+            if not player.loop:
+                if player.loop_queue:
+                    player.queue.append(song)
+                else:
+                    try:
+                        os.remove(song.filepath)
+                    except Exception:
+                        pass
+            else:
+                player.queue.insert(0, song)
+    finally:
+        playback_task = None
 
 # ---- HTTP server serving external index.html + API ----
 def start_http_server():
