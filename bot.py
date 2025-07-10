@@ -48,7 +48,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # ---- Shared state ----
-downloads_in_progress: set[str] = set()
+downloads_in_progress: dict[str, datetime] = {}
 
 # ---- Song & Player ----
 class Song:
@@ -74,6 +74,28 @@ class MusicPlayer:
         return song
 
 player = MusicPlayer()
+
+# ---- Voice channel helpers ----
+def list_voice_channels() -> dict[int, str]:
+    if not bot.guilds:
+        return {}
+    guild = bot.guilds[0]
+    return {ch.id: ch.name for ch in guild.voice_channels}
+
+async def join_channel(channel_id: int):
+    channels = list_voice_channels()
+    if channel_id not in channels:
+        return
+    guild = bot.guilds[0]
+    channel = guild.get_channel(channel_id)
+    if not isinstance(channel, nextcord.VoiceChannel):
+        return
+    vc = guild.voice_client
+    if vc and vc.is_connected():
+        await vc.move_to(channel)
+        player.voice_client = vc
+    else:
+        player.voice_client = await channel.connect()
 
 # ---- TTS helper (gTTS) ----
 async def speak(text: str):
@@ -103,7 +125,7 @@ async def speak(text: str):
 # ---- Download logic ----
 async def download_audio(query: str) -> Song:
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    downloads_in_progress.add(query)
+    downloads_in_progress[query] = datetime.now()
     try:
         # Spotify track
         if re.search(r'https?://(?:open\.)?spotify\.com/track/', query):
@@ -150,7 +172,7 @@ async def download_audio(query: str) -> Song:
             raise RuntimeError("yt_dlp finished but file not found on disk")
         return Song(title, path, query)
     finally:
-        downloads_in_progress.discard(query)
+        downloads_in_progress.pop(query, None)
 
 # ---- Voice helper ----
 async def ensure_voice(interaction: nextcord.Interaction) -> nextcord.VoiceClient:
@@ -309,7 +331,9 @@ async def status(interaction: nextcord.Interaction):
     ]
     if downloads_in_progress:
         lines.append(" Downloading:")
-        lines.extend(f"  {q}" for q in downloads_in_progress)
+        for q, t in downloads_in_progress.items():
+            elapsed = int((datetime.now() - t).total_seconds())
+            lines.append(f"  {q} ({elapsed}s)")
     else:
         lines.append(" Downloading: none")
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
@@ -395,6 +419,12 @@ def start_http_server():
                     asyncio.run_coroutine_threadsafe(remove_at(pos), bot.loop)
                 except:
                     pass
+            elif cmd == 'join' and 'channel' in params:
+                try:
+                    chan = int(params['channel'][0])
+                    asyncio.run_coroutine_threadsafe(join_channel(chan), bot.loop)
+                except:
+                    pass
             elif cmd == 'queue':
                 pass
             else:
@@ -404,6 +434,12 @@ def start_http_server():
                 'current': player.current.title if player.current else None,
                 'queue': [s.title for s in player.queue]
             }
+            resp['downloads'] = {
+                q: int((datetime.now() - t).total_seconds())
+                for q, t in downloads_in_progress.items()
+            }
+            resp['channels'] = {str(cid): name for cid, name in list_voice_channels().items()}
+            resp['connected'] = player.voice_client.channel.name if player.voice_client else None
             data = json.dumps(resp).encode()
             self.send_response(200)
             self.send_header('Content-type','application/json')
