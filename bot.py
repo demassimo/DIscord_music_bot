@@ -73,6 +73,14 @@ class MusicPlayer:
         self.queue.append(song)
         return song
 
+async def add_and_play(query: str):
+    """Queue a song and start playback if idle."""
+    song = await player.add_song(query)
+    vc = player.voice_client
+    if vc and not vc.is_playing():
+        bot.loop.create_task(playback_loop(None))
+    return song
+
 player = MusicPlayer()
 
 # ---- Voice channel helpers ----
@@ -339,7 +347,7 @@ async def status(interaction: nextcord.Interaction):
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 # ---- Playback loop ----
-async def playback_loop(interaction: nextcord.Interaction):
+async def playback_loop(interaction: nextcord.Interaction | None = None):
     vc = player.voice_client
     if not vc:
         return
@@ -357,7 +365,8 @@ async def playback_loop(interaction: nextcord.Interaction):
             await speak(f"Now playing {song.title}")
             src = nextcord.FFmpegOpusAudio(song.filepath, bitrate=64)
             vc.play(src, after=lambda _: player.play_next.set())
-            await interaction.followup.send(f" Now playing **{song.title}**")
+            if interaction:
+                await interaction.followup.send(f" Now playing **{song.title}**")
         except Exception as e:
             log.error(f"Playback error for {song.title}: {e}")
             continue
@@ -412,7 +421,7 @@ def start_http_server():
                 asyncio.run_coroutine_threadsafe(handle_command(cmd), bot.loop)
             elif cmd == 'add' and 'query' in params:
                 q = params['query'][0]
-                asyncio.run_coroutine_threadsafe(player.add_song(q), bot.loop)
+                asyncio.run_coroutine_threadsafe(add_and_play(q), bot.loop)
             elif cmd == 'remove' and 'pos' in params:
                 try:
                     pos = int(params['pos'][0]) - 1
