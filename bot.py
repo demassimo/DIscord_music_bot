@@ -73,6 +73,7 @@ class MusicPlayer:
         self.current: Song | None = None
         self.start_time: float = 0.0
         self.seek_pos: float | None = None
+        self.volume: float = 1.0
 
     async def add_song(self, query: str) -> Song:
         if len(self.queue) >= 10:
@@ -115,6 +116,18 @@ def channel_bitrate() -> int:
             pass
     # Default to a higher quality bitrate when the channel doesn't report one
     return 128
+
+def ffmpeg_options() -> str:
+    """Return common ffmpeg options with current volume."""
+    opts = [
+        '-application', 'audio',
+        '-compression_level', '10',
+        '-vbr', 'on',
+        '-frame_duration', '20',
+    ]
+    if player.volume != 1.0:
+        opts += ['-filter:a', f'volume={player.volume}']
+    return ' '.join(opts)
 
 # ---- Voice channel helpers ----
 def list_voice_channels() -> dict[int, str]:
@@ -161,7 +174,7 @@ async def speak(text: str):
     src = nextcord.FFmpegOpusAudio(
         tts_mp3,
         bitrate=bit,
-        options='-application audio -compression_level 10 -vbr on -frame_duration 20'
+        options=ffmpeg_options(),
     )
     vc.play(src, after=lambda _: done.set())
     await done.wait()
@@ -196,7 +209,12 @@ async def download_audio(query: str) -> Song:
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL
             )
-            await proc.communicate()
+            try:
+                await asyncio.wait_for(proc.communicate(), timeout=300)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                raise RuntimeError('Spotify download timed out')
             prefix = os.path.basename(outfile).split('%')[0]
             entries = [fn for fn in os.listdir(DOWNLOAD_DIR) if fn.startswith(prefix)]
             if not entries:
@@ -212,26 +230,35 @@ async def download_audio(query: str) -> Song:
                 raise RuntimeError("spotdl created directory but no audio inside")
             return Song(os.path.splitext(entry)[0], path, query, get_audio_duration(path))
 
-        # YouTube/other via yt_dlp Python API
-        loop = asyncio.get_event_loop()
-        def ytdlp_download():
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': os.path.join(DOWNLOAD_DIR, '%(id)s.%(ext)s'),
-                'quiet': True
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                return ydl.extract_info(query, download=True)
-        info = await loop.run_in_executor(None, ytdlp_download)
+        # YouTube/other via yt-dlp CLI with timeout
+        cmd = [
+            'yt-dlp', '--print-json', '-f', 'bestaudio/best',
+            '-o', os.path.join(DOWNLOAD_DIR, '%(id)s.%(ext)s'), query
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            raise RuntimeError('YouTube download timed out')
+        try:
+            info = json.loads(out.decode().splitlines()[-1])
+        except Exception:
+            raise RuntimeError('yt-dlp did not return JSON')
         file_id = info.get('id')
-        ext     = info.get('ext')
-        title   = info.get('title', 'Unknown')
+        ext = info.get('ext')
+        title = info.get('title', 'Unknown')
         duration = info.get('duration') or 0
         if not file_id or not ext:
-            raise RuntimeError("yt_dlp did not return valid id/ext")
+            raise RuntimeError('yt-dlp did not return valid id/ext')
         path = os.path.join(DOWNLOAD_DIR, f"{file_id}.{ext}")
         if not os.path.isfile(path):
-            raise RuntimeError("yt_dlp finished but file not found on disk")
+            raise RuntimeError('yt-dlp finished but file not found on disk')
         if not duration:
             duration = get_audio_duration(path)
         return Song(title, path, query, duration)
@@ -404,6 +431,15 @@ async def show_queue(interaction: nextcord.Interaction):
     listing = "\n".join(f"{i+1}. {s.title}" for i, s in enumerate(player.queue))
     await interaction.response.send_message(f" Queue:\n{listing}")
 
+@bot.slash_command(description='Set playback volume (0-100)')
+async def volume(interaction: nextcord.Interaction, level: int):
+    level = max(0, min(level, 100))
+    player.volume = level / 100
+    await interaction.response.send_message(f" Volume set to {level}%")
+    if player.voice_client and player.current and player.voice_client.is_playing():
+        player.seek_pos = time.time() - player.start_time
+        player.voice_client.stop()
+
 @bot.slash_command(description='Show status')
 async def status(interaction: nextcord.Interaction):
     lines = [
@@ -447,7 +483,7 @@ async def playback_loop(interaction: nextcord.Interaction | None = None):
                 src = nextcord.FFmpegOpusAudio(
                     song.filepath,
                     bitrate=bit,
-                    options='-application audio -compression_level 10 -vbr on -frame_duration 20'
+                    options=ffmpeg_options(),
                 )
                 vc.play(src, after=lambda _: player.play_next.set())
                 if interaction:
@@ -466,8 +502,9 @@ async def playback_loop(interaction: nextcord.Interaction | None = None):
                         song.filepath,
                         bitrate=bit,
                         before_options=f'-ss {pos}',
-                        options='-application audio -compression_level 10 -vbr on -frame_duration 20'
+                        options=ffmpeg_options(),
                     )
+                    player.play_next.clear()
                     vc.play(src, after=lambda _: player.play_next.set())
                 except Exception as e:
                     log.error(f'Seek error: {e}')
@@ -552,6 +589,16 @@ def start_http_server():
                         player.voice_client.stop()
                 except Exception:
                     pass
+            elif cmd == 'volume' and 'level' in params:
+                try:
+                    lvl = int(params['level'][0])
+                    lvl = max(0, min(lvl, 100))
+                    player.volume = lvl / 100
+                    if player.voice_client and player.current and player.voice_client.is_playing():
+                        player.seek_pos = time.time() - player.start_time
+                        player.voice_client.stop()
+                except Exception:
+                    pass
             elif cmd == 'queue':
                 pass
             else:
@@ -564,6 +611,7 @@ def start_http_server():
                 'loop_queue': player.loop_queue,
                 'duration': player.current.duration if player.current else 0,
                 'position': time.time() - player.start_time if player.current else 0,
+                'volume': int(player.volume * 100),
             }
             resp['downloads'] = {
                 q: int((datetime.now() - t).total_seconds())
