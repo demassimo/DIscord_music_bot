@@ -4,10 +4,15 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/path/to/DIscord_music_bot
-ExecStart=/usr/bin/php ws_server.php
-Environment=DISCORD_TOKEN=
+WorkingDirectory=/home/masscom4/domains/musicbot.masscomputing.co.za/private
+ExecStart=/usr/bin/python3 /home/masscom4/domains/musicbot.masscomputing.co.za/private/bot.py
+Environment=HTTP_AUTH_USER=
+Environment=SPOTDL_SPOTIFY_CLIENT_ID=
+Environment=SPOTDL_SPOTIFY_CLIENT_SECRET=
+Environment=HTTP_AUTH_PASS=
+DISCORD_TOKEN=
 Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
