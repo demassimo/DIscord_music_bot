@@ -83,6 +83,18 @@ async def add_and_play(query: str):
 
 player = MusicPlayer()
 
+# ---- Audio configuration ----
+def channel_bitrate() -> int:
+    """Return the target bitrate in kbps for the connected voice channel."""
+    vc = player.voice_client
+    if vc and vc.channel and getattr(vc.channel, 'bitrate', None):
+        try:
+            # Clamp to Discord's supported range and convert to kbps
+            return max(32, min(vc.channel.bitrate // 1000, 128))
+        except Exception:
+            pass
+    return 64
+
 # ---- Voice channel helpers ----
 def list_voice_channels() -> dict[int, str]:
     if not bot.guilds:
@@ -122,7 +134,13 @@ async def speak(text: str):
     except Exception:
         return
     done = asyncio.Event()
-    src = nextcord.FFmpegOpusAudio(tts_mp3, bitrate=64)
+    bit = channel_bitrate()
+    src = await nextcord.FFmpegOpusAudio.from_probe(
+        tts_mp3,
+        method='fallback',
+        bitrate=bit,
+        opus_options='-application audio -compression_level 10 -vbr on -frame_duration 60'
+    )
     vc.play(src, after=lambda _: done.set())
     await done.wait()
     try:
@@ -363,7 +381,13 @@ async def playback_loop(interaction: nextcord.Interaction | None = None):
         player.current = song
         try:
             await speak(f"Now playing {song.title}")
-            src = nextcord.FFmpegOpusAudio(song.filepath, bitrate=64)
+            bit = channel_bitrate()
+            src = await nextcord.FFmpegOpusAudio.from_probe(
+                song.filepath,
+                method='fallback',
+                bitrate=bit,
+                opus_options='-application audio -compression_level 10 -vbr on -frame_duration 60'
+            )
             vc.play(src, after=lambda _: player.play_next.set())
             if interaction:
                 await interaction.followup.send(f" Now playing **{song.title}**")
