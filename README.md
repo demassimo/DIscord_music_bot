@@ -15,6 +15,9 @@ This bot uses Nextcord application commands to play music from YouTube, YouTube 
 - The bot speaks events like downloads and currently playing tracks using TTS
 - **Show Queue** context command via the Apps menu when right clicking the bot
 
+Audio is streamed at the connected channel's bitrate (clamped to 384 kb/s) or
+a default of 128 kb/s for higher quality.
+
 After a song finishes playing it is removed from disk. The queue is limited to 10 entries.
 
 ## Running
