@@ -87,7 +87,10 @@ async def speak(text: str):
     def gen_tts():
         t = gTTS(text, lang='en')
         t.save(tts_mp3)
-    await loop.run_in_executor(None, gen_tts)
+    try:
+        await loop.run_in_executor(None, gen_tts)
+    except Exception:
+        return
     done = asyncio.Event()
     src = nextcord.FFmpegOpusAudio(tts_mp3, bitrate=64)
     vc.play(src, after=lambda _: done.set())
@@ -153,8 +156,9 @@ async def download_audio(query: str) -> Song:
 async def ensure_voice(interaction: nextcord.Interaction) -> nextcord.VoiceClient:
     vc = interaction.guild.voice_client
     if vc and vc.is_connected():
+        player.voice_client = vc
         return vc
-    if not interaction.user.voice:
+    if not interaction.user.voice or not interaction.user.voice.channel:
         raise RuntimeError("You must be in a voice channel.")
     vc = await interaction.user.voice.channel.connect()
     player.voice_client = vc
@@ -176,6 +180,16 @@ async def handle_command(cmd: str):
             try: os.remove(s.filepath)
             except: pass
         player.queue.clear()
+
+async def remove_at(index: int):
+    """Remove a queued song by its index."""
+    if index < 0 or index >= len(player.queue):
+        return
+    song = player.queue.pop(index)
+    try:
+        os.remove(song.filepath)
+    except Exception:
+        pass
 
 # ---- Slash commands ----
 @bot.slash_command(description='Join your voice channel')
@@ -214,20 +228,22 @@ async def play(interaction: nextcord.Interaction, query: str):
             song = await player.add_song(query)
             await interaction.followup.send(f" Added **{song.title}** to the queue")
         elif 'list=' in query:
-            with yt_dlp.YoutubeDL({'quiet':True,'extract_flat':'in_playlist'}) as ydl:
+            with yt_dlp.YoutubeDL({'quiet': True, 'extract_flat': 'in_playlist'}) as ydl:
                 info = ydl.extract_info(query, download=False)
-            entries = info.get('entries', [])
+            entries = info.get('entries') or []
             added = 0
             for e in entries:
-                if len(player.queue) >= 10: break
+                if len(player.queue) >= 10:
+                    break
                 url = e.get('url') or e.get('webpage_url')
-                if not url: continue
+                if not url:
+                    continue
                 if not url.startswith('http'):
                     url = f"https://www.youtube.com/watch?v={url}"
                 try:
                     await player.add_song(url)
                     added += 1
-                except RuntimeError:
+                except (RuntimeError, IndexError):
                     break
             await interaction.followup.send(f" Added **{added}** songs from playlist")
         else:
@@ -301,8 +317,11 @@ async def status(interaction: nextcord.Interaction):
 # ---- Playback loop ----
 async def playback_loop(interaction: nextcord.Interaction):
     vc = player.voice_client
-    if not vc: return
+    if not vc:
+        return
     while True:
+        if not vc.is_connected():
+            break
         player.play_next.clear()
         if not player.queue:
             await asyncio.sleep(1)
