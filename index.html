@@ -4,14 +4,44 @@
   <meta charset="utf-8">
   <title>MusicBot Control</title>
   <style>
-    body { margin:0; font-family:sans-serif; background:#111; color:#eee; }
-    header { background:#222; padding:1em; text-align:center; font-size:1.5em; }
-    main { padding:1em; }
-    button { background:#333; color:#eee; border:none; padding:0.5em 1em; margin:0.2em; border-radius:4px; cursor:pointer; }
-    button:hover { background:#444; }
-    input { padding:0.5em; width:70%; margin-right:0.5em; border:1px solid #333; border-radius:4px; }
+    body {
+      margin:0;
+      font-family:Roboto, Arial, sans-serif;
+      background:#181818;
+      color:#eee;
+    }
+    header {
+      background:#202020;
+      padding:1em;
+      text-align:center;
+      font-size:1.8em;
+      color:#fff;
+    }
+    main { padding:1em; max-width:800px; margin:0 auto; }
+    button {
+      background:#333;
+      color:#eee;
+      border:none;
+      padding:0.5em 1em;
+      margin:0.2em;
+      border-radius:4px;
+      cursor:pointer;
+    }
+    button:hover { background:#ff0000; }
+    input {
+      padding:0.5em;
+      width:70%;
+      margin-right:0.5em;
+      border:1px solid #333;
+      border-radius:4px;
+    }
     #queue { list-style:none; padding:0; }
-    #queue li { display:flex; justify-content:space-between; padding:0.5em; border-bottom:1px solid #333; }
+    #queue li {
+      display:flex;
+      justify-content:space-between;
+      padding:0.5em;
+      border-bottom:1px solid #333;
+    }
     #queue li button { padding:0.2em 0.5em; }
   </style>
 </head>
@@ -120,7 +150,7 @@
       api('seek', '?pos=' + e.target.value);
     });
     loadQueue();
-    setInterval(loadQueue, 5000);
+    setInterval(loadQueue, 1000);
   </script>
 </body>
 </html>
