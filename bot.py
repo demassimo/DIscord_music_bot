@@ -108,11 +108,13 @@ def channel_bitrate() -> int:
     vc = player.voice_client
     if vc and vc.channel and getattr(vc.channel, 'bitrate', None):
         try:
-            # Clamp to Discord's supported range and convert to kbps
-            return max(32, min(vc.channel.bitrate // 1000, 128))
+            # Discord allows up to 384 kb/s for boosted servers.
+            # Convert the channel bitrate from bps to kbps and clamp it.
+            return max(32, min(vc.channel.bitrate // 1000, 384))
         except Exception:
             pass
-    return 64
+    # Default to a higher quality bitrate when the channel doesn't report one
+    return 128
 
 # ---- Voice channel helpers ----
 def list_voice_channels() -> dict[int, str]:
