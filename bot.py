@@ -159,7 +159,7 @@ async def speak(text: str):
     src = nextcord.FFmpegOpusAudio(
         tts_mp3,
         bitrate=bit,
-        options='-application audio -compression_level 10 -vbr on -frame_duration 60'
+        options='-application audio -compression_level 10 -vbr on -frame_duration 20'
     )
     vc.play(src, after=lambda _: done.set())
     await done.wait()
@@ -442,7 +442,7 @@ async def playback_loop(interaction: nextcord.Interaction | None = None):
                 src = nextcord.FFmpegOpusAudio(
                     song.filepath,
                     bitrate=bit,
-                    options='-application audio -compression_level 10 -vbr on -frame_duration 60'
+                    options='-application audio -compression_level 10 -vbr on -frame_duration 20'
                 )
                 vc.play(src, after=lambda _: player.play_next.set())
                 if interaction:
@@ -461,7 +461,7 @@ async def playback_loop(interaction: nextcord.Interaction | None = None):
                         song.filepath,
                         bitrate=bit,
                         before_options=f'-ss {pos}',
-                        options='-application audio -compression_level 10 -vbr on -frame_duration 60'
+                        options='-application audio -compression_level 10 -vbr on -frame_duration 20'
                     )
                     vc.play(src, after=lambda _: player.play_next.set())
                 except Exception as e:
