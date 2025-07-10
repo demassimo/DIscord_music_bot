@@ -6,6 +6,7 @@ import asyncio
 import logging
 import base64
 import re
+import json
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
@@ -13,7 +14,9 @@ import urllib.parse
 
 import nextcord
 from nextcord.ext import commands, tasks
-import yt_dlp  # ← Make sure this import is here
+import yt_dlp
+from gtts import gTTS
+from shutil import which
 
 # ---- Configuration ----
 DOWNLOAD_DIR = os.environ.get(
@@ -33,9 +36,8 @@ logging.basicConfig(
 log = logging.getLogger('musicbot')
 
 # ---- Dependency checks ----
-from shutil import which
 if not which('ffmpeg'):
-    log.error("ffmpeg not found; install with e.g. apt install ffmpeg")
+    log.error("ffmpeg not found; install it (e.g. apt install ffmpeg)")
     sys.exit(1)
 if not which('spotdl'):
     log.warning("spotdl not found; Spotify support will not work")
@@ -73,27 +75,26 @@ class MusicPlayer:
 
 player = MusicPlayer()
 
-# ---- TTS helper ----
+# ---- TTS helper (gTTS) ----
 async def speak(text: str):
     vc = player.voice_client
     if not vc:
         return
     while vc.is_playing():
         await asyncio.sleep(0.1)
-    tmp = os.path.join(DOWNLOAD_DIR, f"tts_{uuid.uuid4()}.wav")
-    proc = await asyncio.create_subprocess_exec(
-        'espeak', text, '-w', tmp,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL
-    )
-    await proc.communicate()
+    tts_mp3 = os.path.join(DOWNLOAD_DIR, f"tts_{uuid.uuid4()}.mp3")
+    loop = asyncio.get_event_loop()
+    def gen_tts():
+        t = gTTS(text, lang='en')
+        t.save(tts_mp3)
+    await loop.run_in_executor(None, gen_tts)
     done = asyncio.Event()
-    src = nextcord.FFmpegPCMAudio(tmp)
+    src = nextcord.FFmpegOpusAudio(tts_mp3, bitrate=64)
     vc.play(src, after=lambda _: done.set())
     await done.wait()
     try:
-        os.remove(tmp)
-    except Exception:
+        os.remove(tts_mp3)
+    except:
         pass
 
 # ---- Download logic ----
@@ -101,7 +102,7 @@ async def download_audio(query: str) -> Song:
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     downloads_in_progress.add(query)
     try:
-        # 1) Spotify track via spotdl subprocess
+        # Spotify track
         if re.search(r'https?://(?:open\.)?spotify\.com/track/', query):
             template = f"{uuid.uuid4()}.%(ext)s"
             outfile = os.path.join(DOWNLOAD_DIR, template)
@@ -111,7 +112,6 @@ async def download_audio(query: str) -> Song:
                 stderr=asyncio.subprocess.DEVNULL
             )
             await proc.communicate()
-
             prefix = os.path.basename(outfile).split('%')[0]
             entries = [fn for fn in os.listdir(DOWNLOAD_DIR) if fn.startswith(prefix)]
             if not entries:
@@ -119,7 +119,6 @@ async def download_audio(query: str) -> Song:
             entry = entries[0]
             path = os.path.join(DOWNLOAD_DIR, entry)
             if os.path.isdir(path):
-                # pick first audio inside
                 for root, _, files in os.walk(path):
                     for f in files:
                         if f.lower().endswith(('.mp3','.m4a','.flac','.wav','.opus','.ogg')):
@@ -127,7 +126,7 @@ async def download_audio(query: str) -> Song:
                 raise RuntimeError("spotdl created directory but no audio inside")
             return Song(os.path.splitext(entry)[0], path, query)
 
-        # 2) YouTube/URL via yt_dlp Python API in executor
+        # YouTube/other via yt_dlp Python API
         loop = asyncio.get_event_loop()
         def ytdlp_download():
             ydl_opts = {
@@ -136,20 +135,17 @@ async def download_audio(query: str) -> Song:
                 'quiet': True
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(query, download=True)
-                return info
+                return ydl.extract_info(query, download=True)
         info = await loop.run_in_executor(None, ytdlp_download)
-        # info dict has 'id' and 'ext'
         file_id = info.get('id')
-        ext = info.get('ext')
-        title = info.get('title', 'Unknown')
+        ext     = info.get('ext')
+        title   = info.get('title', 'Unknown')
         if not file_id or not ext:
-            raise RuntimeError("yt_dlp did not return a valid file id/ext")
+            raise RuntimeError("yt_dlp did not return valid id/ext")
         path = os.path.join(DOWNLOAD_DIR, f"{file_id}.{ext}")
         if not os.path.isfile(path):
             raise RuntimeError("yt_dlp finished but file not found on disk")
         return Song(title, path, query)
-
     finally:
         downloads_in_progress.discard(query)
 
@@ -164,43 +160,29 @@ async def ensure_voice(interaction: nextcord.Interaction) -> nextcord.VoiceClien
     player.voice_client = vc
     return vc
 
-# ---- Playback loop ----
-async def playback_loop(interaction: nextcord.Interaction):
+# ---- Command handler ----
+async def handle_command(cmd: str):
     vc = player.voice_client
     if not vc:
         return
-    while True:
-        player.play_next.clear()
-        if not player.queue:
-            await asyncio.sleep(1)
-            continue
-
-        song = player.queue.pop(0)
-        player.history.append(song)
-        player.current = song
-
-        try:
-            await speak(f"Now playing {song.title}")
-            src = nextcord.FFmpegOpusAudio(song.filepath, bitrate=64)
-            vc.play(src, after=lambda _: player.play_next.set())
-            await interaction.followup.send(f"Now playing: {song.title}")
-        except Exception as e:
-            log.error(f"Playback error for {song.title}: {e}")
-            continue
-
-        await player.play_next.wait()
-        if not player.loop:
-            try: os.remove(song.filepath)
+    if cmd in ('skip', 'stop') and vc.is_playing():
+        vc.stop()
+    elif cmd == 'pause' and vc.is_playing():
+        vc.pause()
+    elif cmd == 'resume' and vc.is_paused():
+        vc.resume()
+    elif cmd == 'clear':
+        for s in list(player.queue):
+            try: os.remove(s.filepath)
             except: pass
-        else:
-            player.queue.insert(0, song)
+        player.queue.clear()
 
 # ---- Slash commands ----
-@bot.slash_command(description='Join the voice channel')
+@bot.slash_command(description='Join your voice channel')
 async def join(interaction: nextcord.Interaction):
     try:
         vc = await ensure_voice(interaction)
-        await interaction.response.send_message(f"Joined {vc.channel.name}")
+        await interaction.response.send_message(f" Joined **{vc.channel.name}**")
     except Exception as e:
         await interaction.response.send_message(str(e), ephemeral=True)
 
@@ -210,7 +192,7 @@ async def leave(interaction: nextcord.Interaction):
     if vc and vc.is_connected():
         await vc.disconnect()
         player.current = None
-        await interaction.response.send_message("Left the voice channel")
+        await interaction.response.send_message(" Left the voice channel")
     else:
         await interaction.response.send_message("Not in a voice channel", ephemeral=True)
 
@@ -219,23 +201,19 @@ async def play(interaction: nextcord.Interaction, query: str):
     await interaction.response.defer()
     try:
         await ensure_voice(interaction)
-        await speak(f"Downloading {query}")
+        if 'list=' in query:
+            await speak("Please wait, downloading playlist this may take a while")
+        else:
+            await speak("Please wait, downloading song")
 
-        # convert YouTube Music playlist URL
         m = re.search(r'music\.youtube\.com/playlist\?list=([^&]+)', query)
         if m:
             query = f"https://www.youtube.com/playlist?list={m.group(1)}"
 
-        # Spotify single track
         if re.search(r'https?://(?:open\.)?spotify\.com/track/', query):
             song = await player.add_song(query)
-            await interaction.followup.send(f"Added {song.title} to queue")
-            if not interaction.guild.voice_client.is_playing():
-                bot.loop.create_task(playback_loop(interaction))
-            return
-
-        # YouTube playlist
-        if 'list=' in query:
+            await interaction.followup.send(f" Added **{song.title}** to the queue")
+        elif 'list=' in query:
             with yt_dlp.YoutubeDL({'quiet':True,'extract_flat':'in_playlist'}) as ydl:
                 info = ydl.extract_info(query, download=False)
             entries = info.get('entries', [])
@@ -251,14 +229,11 @@ async def play(interaction: nextcord.Interaction, query: str):
                     added += 1
                 except RuntimeError:
                     break
-            await interaction.followup.send(f"Added {added} songs from playlist")
-            if not interaction.guild.voice_client.is_playing():
-                bot.loop.create_task(playback_loop(interaction))
-            return
+            await interaction.followup.send(f" Added **{added}** songs from playlist")
+        else:
+            song = await player.add_song(query)
+            await interaction.followup.send(f" Added **{song.title}** to the queue")
 
-        # fallback single track
-        song = await player.add_song(query)
-        await interaction.followup.send(f"Added {song.title} to queue")
         if not interaction.guild.voice_client.is_playing():
             bot.loop.create_task(playback_loop(interaction))
 
@@ -267,18 +242,28 @@ async def play(interaction: nextcord.Interaction, query: str):
 
 @bot.slash_command(description='Skip the current song')
 async def skip(interaction: nextcord.Interaction):
-    vc = interaction.guild.voice_client
-    if vc and vc.is_playing():
-        vc.stop()
-        await interaction.response.send_message("Skipped")
-    else:
-        await interaction.response.send_message("Nothing is playing", ephemeral=True)
+    await handle_command('skip')
+    await interaction.response.send_message(" Skipped")
+
+@bot.slash_command(description='Stop playback')
+async def stop(interaction: nextcord.Interaction):
+    await handle_command('stop')
+    await interaction.response.send_message(" Stopped playback")
+
+@bot.slash_command(description='Pause playback')
+async def pause(interaction: nextcord.Interaction):
+    await handle_command('pause')
+    await interaction.response.send_message(" Paused playback")
+
+@bot.slash_command(description='Resume playback')
+async def resume(interaction: nextcord.Interaction):
+    await handle_command('resume')
+    await interaction.response.send_message(" Resumed playback")
 
 @bot.slash_command(description='Toggle loop mode')
 async def loop(interaction: nextcord.Interaction):
     player.loop = not player.loop
-    state = "on" if player.loop else "off"
-    await interaction.response.send_message(f"Loop is now {state}")
+    await interaction.response.send_message(f" Loop is now **{'on' if player.loop else 'off'}**")
 
 @bot.slash_command(description='Replay the previous song')
 async def back(interaction: nextcord.Interaction):
@@ -289,109 +274,129 @@ async def back(interaction: nextcord.Interaction):
         return await interaction.response.send_message("Queue full", ephemeral=True)
     song = await player.add_song(prev.query)
     player.queue.insert(0, song)
-    await interaction.response.send_message(f"Replaying {song.title}")
+    await interaction.response.send_message(f" Replaying **{song.title}**")
     if not interaction.guild.voice_client.is_playing():
         bot.loop.create_task(playback_loop(interaction))
 
 @bot.slash_command(description='Show the queue')
-async def queue(interaction: nextcord.Interaction):
+async def show_queue(interaction: nextcord.Interaction):
     if not player.queue:
-        return await interaction.response.send_message("Queue is empty", ephemeral=True)
+        return await interaction.response.send_message("The queue is empty", ephemeral=True)
     listing = "\n".join(f"{i+1}. {s.title}" for i, s in enumerate(player.queue))
-    await interaction.response.send_message(f"Queue:\n{listing}")
+    await interaction.response.send_message(f" Queue:\n{listing}")
 
 @bot.slash_command(description='Show status')
 async def status(interaction: nextcord.Interaction):
     lines = [
-        f"Currently playing: {player.current.title if player.current else 'none'}",
-        f"Queue length: {len(player.queue)}"
+        f" Currently playing: {player.current.title if player.current else 'none'}",
+        f" Queue length: {len(player.queue)}"
     ]
     if downloads_in_progress:
-        lines.append("Downloading:")
-        lines.extend(f" - {q}" for q in downloads_in_progress)
+        lines.append(" Downloading:")
+        lines.extend(f"  {q}" for q in downloads_in_progress)
     else:
-        lines.append("Downloading: none")
+        lines.append(" Downloading: none")
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
-# ---- Cleanup task ----
-@tasks.loop(hours=1)
-async def periodic_cleanup():
-    removed = purge_old_files()
-    if removed:
-        log.info(f"Periodic cleanup removed {removed} file(s).")
-
-def purge_old_files() -> int:
-    cutoff = datetime.now() - timedelta(hours=FILE_RETENTION_HOURS)
-    removed = 0
-    for fname in os.listdir(DOWNLOAD_DIR):
-        path = os.path.join(DOWNLOAD_DIR, fname)
-        if os.path.isfile(path) and datetime.fromtimestamp(os.path.getmtime(path)) < cutoff:
-            try: os.remove(path); removed += 1
-            except: pass
-    return removed
-
-# ---- HTTP control with basic auth ----
-async def handle_command(cmd: str):
+# ---- Playback loop ----
+async def playback_loop(interaction: nextcord.Interaction):
     vc = player.voice_client
-    if not vc:
-        return
-    if cmd == "skip" and vc.is_playing():
-        vc.stop()
-    elif cmd == "clear":
-        for s in list(player.queue):
-            try: os.remove(s.filepath)
+    if not vc: return
+    while True:
+        player.play_next.clear()
+        if not player.queue:
+            await asyncio.sleep(1)
+            continue
+        song = player.queue.pop(0)
+        player.history.append(song)
+        player.current = song
+        try:
+            await speak(f"Now playing {song.title}")
+            src = nextcord.FFmpegOpusAudio(song.filepath, bitrate=64)
+            vc.play(src, after=lambda _: player.play_next.set())
+            await interaction.followup.send(f" Now playing **{song.title}**")
+        except Exception as e:
+            log.error(f"Playback error for {song.title}: {e}")
+            continue
+        await player.play_next.wait()
+        if not player.loop:
+            try: os.remove(song.filepath)
             except: pass
-        player.queue.clear()
+        else:
+            player.queue.insert(0, song)
 
-INDEX_HTML = """<!DOCTYPE html>
-<html>
-<head><meta charset='utf-8'><title>MusicBot</title></head>
-<body>
-<h1>MusicBot Control</h1>
-<button onclick=\"cmd('skip')\">Skip</button>
-<button onclick=\"cmd('clear')\">Clear Queue</button>
-<script>
-function cmd(c){ fetch('/command?cmd='+c).then(r=>r.text()).then(alert); }
-</script>
-</body>
-</html>
-"""
-
+# ---- HTTP server serving external index.html + API ----
 def start_http_server():
+    html_path = os.path.join(os.path.dirname(__file__), 'index.html')
+
     class AuthHandler(BaseHTTPRequestHandler):
         def do_AUTHHEAD(self):
             self.send_response(401)
-            self.send_header("WWW-Authenticate", 'Basic realm="MusicBot"')
-            self.send_header("Content-type", "text/plain")
+            self.send_header('WWW-Authenticate','Basic realm="MusicBot"')
+            self.send_header('Content-type','text/plain')
             self.end_headers()
-        def do_GET(self):
-            if self.path == "/":
-                self.send_response(200)
-                self.send_header("Content-type", "text/html")
-                self.end_headers()
-                self.wfile.write(INDEX_HTML.encode())
-                return
-            auth = self.headers.get("Authorization")
-            if not auth or not auth.startswith("Basic "):
-                return self.do_AUTHHEAD()
-            creds = base64.b64decode(auth.split(" ",1)[1]).decode()
-            user,pwd = creds.split(":",1)
-            if user!=AUTH_USER or pwd!=AUTH_PASS:
-                return self.do_AUTHHEAD()
-            parsed = urllib.parse.urlparse(self.path)
-            if parsed.path == "/command":
-                cmd = urllib.parse.parse_qs(parsed.query).get("cmd",[None])[0]
-                if cmd:
-                    asyncio.run_coroutine_threadsafe(handle_command(cmd), bot.loop)
-                self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
-            else:
-                self.send_response(404); self.end_headers()
 
-    server = HTTPServer(("0.0.0.0", HTTP_CONTROL_PORT), AuthHandler)
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            # serve index.html
+            if parsed.path in ('/', '/index.html'):
+                try:
+                    with open(html_path, 'rb') as f:
+                        content = f.read()
+                    self.send_response(200)
+                    self.send_header('Content-type','text/html')
+                    self.send_header('Content-length', str(len(content)))
+                    self.end_headers()
+                    self.wfile.write(content)
+                except FileNotFoundError:
+                    self.send_error(404, 'index.html not found')
+                return
+
+            # require auth for /api
+            if not parsed.path.startswith('/api/'):
+                return self.send_error(404)
+            auth = self.headers.get('Authorization')
+            if not auth or not auth.startswith('Basic '):
+                return self.do_AUTHHEAD()
+            user, pwd = base64.b64decode(auth.split(' ',1)[1]).decode().split(':',1)
+            if user != AUTH_USER or pwd != AUTH_PASS:
+                return self.do_AUTHHEAD()
+
+            cmd = parsed.path[len('/api/'):]
+            params = urllib.parse.parse_qs(parsed.query)
+
+            if cmd in ('skip','stop','pause','resume','clear'):
+                asyncio.run_coroutine_threadsafe(handle_command(cmd), bot.loop)
+            elif cmd == 'add' and 'query' in params:
+                q = params['query'][0]
+                asyncio.run_coroutine_threadsafe(player.add_song(q), bot.loop)
+            elif cmd == 'remove' and 'pos' in params:
+                try:
+                    pos = int(params['pos'][0]) - 1
+                    asyncio.run_coroutine_threadsafe(remove_at(pos), bot.loop)
+                except:
+                    pass
+            elif cmd == 'queue':
+                pass
+            else:
+                return self.send_error(400)
+
+            resp = {
+                'current': player.current.title if player.current else None,
+                'queue': [s.title for s in player.queue]
+            }
+            data = json.dumps(resp).encode()
+            self.send_response(200)
+            self.send_header('Content-type','application/json')
+            self.send_header('Content-length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = HTTPServer(('0.0.0.0', HTTP_CONTROL_PORT), AuthHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     log.info(f"HTTP control (auth) on port {HTTP_CONTROL_PORT}")
 
-# ---- Bot events ----
+# ---- Bot events & cleanup ----
 @bot.event
 async def on_ready():
     log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
@@ -399,16 +404,30 @@ async def on_ready():
 
 @bot.event
 async def on_application_command_error(interaction, error):
-    log.error(f"Error in command {interaction.command.name}: {error}")
+    log.error(f"Error in {interaction.command.name}: {error}")
     if isinstance(error, RuntimeError):
         await interaction.response.send_message(str(error), ephemeral=True)
 
+@tasks.loop(hours=1)
+async def periodic_cleanup():
+    cutoff = datetime.now() - timedelta(hours=FILE_RETENTION_HOURS)
+    removed = 0
+    for fname in os.listdir(DOWNLOAD_DIR):
+        path = os.path.join(DOWNLOAD_DIR, fname)
+        if os.path.isfile(path) and datetime.fromtimestamp(os.path.getmtime(path)) < cutoff:
+            try:
+                os.remove(path)
+                removed += 1
+            except:
+                pass
+    if removed:
+        log.info(f"Cleaned up {removed} old files")
+
 # ---- Entrypoint ----
-if __name__ == "__main__":
+if __name__ == '__main__':
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     start_http_server()
-    token = os.environ.get('DISCORD_TOKEN')
+    token = os.environ.get('DISCORD_TOKEN', '')
     if not token:
-        log.error('DISCORD_TOKEN environment variable not set')
-        sys.exit(1)
+        log.error('DISCORD_TOKEN not set'); sys.exit(1)
     bot.run(token)
