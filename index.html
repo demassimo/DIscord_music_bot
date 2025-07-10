@@ -28,6 +28,11 @@
       <input id="query" placeholder="Song URL or search term">
       <button onclick="addSong()">Add Song</button>
     </div>
+    <div style="margin-top:1em;">
+      <select id="channels"></select>
+      <button onclick="joinChannel()">Join</button>
+    </div>
+    <div id="status" style="margin-top:1em;"></div>
     <h3>Queue</h3>
     <ul id="queue"></ul>
   </main>
@@ -60,8 +65,25 @@
         li.appendChild(btn);
         ul.appendChild(li);
       });
+      let sel = document.getElementById('channels');
+      sel.innerHTML = '';
+      Object.entries(data.channels).forEach(([id, name]) => {
+        let opt = document.createElement('option');
+        opt.value = id;
+        opt.textContent = name;
+        sel.appendChild(opt);
+      });
+      if (data.connected) sel.value = Object.keys(data.channels).find(k => data.channels[k] === data.connected) || '';
+      let status = document.getElementById('status');
+      let dls = Object.entries(data.downloads).map(([q,s]) => `${q} (${s}s)`).join('<br>');
+      status.innerHTML = `Playing: ${data.current || 'none'}<br>Voice: ${data.connected || 'none'}<br>Downloading:<br>${dls || 'none'}`;
+    }
+    async function joinChannel() {
+      let id = document.getElementById('channels').value;
+      if (id) await api('join', '?channel=' + id);
     }
     loadQueue();
+    setInterval(loadQueue, 5000);
   </script>
 </body>
 </html>
