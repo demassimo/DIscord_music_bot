@@ -21,9 +21,9 @@ After a song finishes playing it is removed from disk. The queue is limited to 1
 
 1. Install dependencies:
    ```bash
-   pip install nextcord yt-dlp spotdl
+   pip install nextcord yt-dlp spotdl gtts
    ```
-   The bot also requires `ffmpeg` and `espeak` installed on the system.
+   The bot also requires `ffmpeg` installed on the system.
 2. Set the `DISCORD_TOKEN` environment variable with your bot token.
 3. Ensure `ffmpeg` is installed and in your PATH.
 4. Run the bot:
