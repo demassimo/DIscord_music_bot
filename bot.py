@@ -53,6 +53,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 downloads_in_progress: dict[str, datetime] = {}
 last_channel_id: int | None = None
 playback_task: asyncio.Task | None = None
+last_playlist_files: set[str] = set()
 
 # ---- Song & Player ----
 class Song:
@@ -75,6 +76,7 @@ class MusicPlayer:
         self.seek_pos: float | None = None
         self.volume: float = 1.0
         self.lock = asyncio.Lock()
+        self.paused_pos: float | None = None
 
     async def add_song(self, query: str) -> Song:
         if len(self.queue) >= 10:
@@ -101,6 +103,49 @@ async def add_and_play(query: str):
     if not playback_task or playback_task.done():
         playback_task = bot.loop.create_task(playback_loop(None))
     return song
+
+async def add_playlist(url: str) -> list[Song]:
+    """Download a playlist and queue its tracks."""
+    global last_playlist_files
+    last_playlist_files.clear()
+    with yt_dlp.YoutubeDL({'quiet': True, 'extract_flat': 'in_playlist'}) as ydl:
+        info = ydl.extract_info(url, download=False)
+    entries = info.get('entries') or []
+    added: list[Song] = []
+    for e in entries:
+        if len(player.queue) >= 10:
+            break
+        track_url = e.get('url') or e.get('webpage_url')
+        if not track_url:
+            continue
+        if not track_url.startswith('http'):
+            track_url = f"https://www.youtube.com/watch?v={track_url}"
+        try:
+            song = await player.add_song(track_url)
+            added.append(song)
+            last_playlist_files.add(song.filepath)
+        except RuntimeError:
+            break
+    return added
+
+async def add_playlist_and_play(url: str) -> list[Song]:
+    """Add playlist tracks and ensure playback starts."""
+    songs = await add_playlist(url)
+    vc = player.voice_client
+    if not vc or not vc.is_connected():
+        if last_channel_id is not None:
+            await join_channel(last_channel_id)
+            vc = player.voice_client
+        else:
+            channels = list_voice_channels()
+            if channels:
+                first_id = next(iter(channels.keys()))
+                await join_channel(first_id)
+                vc = player.voice_client
+    global playback_task
+    if vc and (not playback_task or playback_task.done()):
+        playback_task = bot.loop.create_task(playback_loop(None))
+    return songs
 
 player = MusicPlayer()
 
@@ -288,8 +333,12 @@ async def handle_command(cmd: str):
     if cmd in ('skip', 'stop') and vc.is_playing():
         vc.stop()
     elif cmd == 'pause' and vc.is_playing():
+        player.paused_pos = time.time() - player.start_time
         vc.pause()
     elif cmd == 'resume' and vc.is_paused():
+        if player.paused_pos is not None:
+            player.start_time = time.time() - player.paused_pos
+            player.paused_pos = None
         vc.resume()
     elif cmd == 'loop':
         player.loop = not player.loop
@@ -311,14 +360,31 @@ async def remove_at(index: int):
     except Exception:
         pass
 
+async def remove_last_playlist():
+    """Remove songs added by the last playlist command."""
+    global last_playlist_files
+    removed = 0
+    for song in list(player.queue):
+        if song.filepath in last_playlist_files:
+            try:
+                os.remove(song.filepath)
+            except Exception:
+                pass
+            player.queue.remove(song)
+            removed += 1
+    last_playlist_files.clear()
+    return removed
+
 async def set_volume(level: int):
     """Safely adjust playback volume from within the event loop."""
     level = max(0, min(level, 100))
     async with player.lock:
         player.volume = level / 100
         vc = player.voice_client
-        if vc and player.current and vc.is_playing():
-            player.seek_pos = time.time() - player.start_time
+        if vc and player.current and (vc.is_playing() or vc.is_paused()):
+            pos = player.paused_pos if player.paused_pos is not None else time.time() - player.start_time
+            player.paused_pos = pos if vc.is_paused() else None
+            player.seek_pos = pos
             vc.stop()
 
 async def seek_to(position: float):
@@ -329,7 +395,9 @@ async def seek_to(position: float):
         player.seek_pos = position
         player.start_time = time.time() - position
         vc = player.voice_client
-        if vc and vc.is_playing():
+        if vc and (vc.is_playing() or vc.is_paused()):
+            was_paused = vc.is_paused() or player.paused_pos is not None
+            player.paused_pos = position if was_paused else None
             vc.stop()
 
 # ---- Slash commands ----
@@ -401,6 +469,26 @@ async def play(interaction: nextcord.Interaction, query: str):
     except Exception as e:
         await interaction.followup.send(str(e), ephemeral=True)
 
+@bot.slash_command(description='Add all songs from a playlist')
+async def playlist(interaction: nextcord.Interaction, url: str):
+    await interaction.response.defer()
+    try:
+        await ensure_voice(interaction)
+        await speak("Please wait, downloading playlist")
+        songs = await add_playlist(url)
+        await interaction.followup.send(f" Added **{len(songs)}** songs from playlist")
+        global playback_task
+        vc = interaction.guild.voice_client
+        if vc and (not playback_task or playback_task.done()):
+            playback_task = bot.loop.create_task(playback_loop(interaction))
+    except Exception as e:
+        await interaction.followup.send(str(e), ephemeral=True)
+
+@bot.slash_command(description='Remove songs added by the last playlist command')
+async def remove_playlist(interaction: nextcord.Interaction):
+    removed = await remove_last_playlist()
+    await interaction.response.send_message(f" Removed {removed} playlist songs")
+
 @bot.slash_command(description='Skip the current song')
 async def skip(interaction: nextcord.Interaction):
     await handle_command('skip')
@@ -410,6 +498,11 @@ async def skip(interaction: nextcord.Interaction):
 async def stop(interaction: nextcord.Interaction):
     await handle_command('stop')
     await interaction.response.send_message(" Stopped playback")
+
+@bot.slash_command(description='Clear the queue')
+async def clear(interaction: nextcord.Interaction):
+    await handle_command('clear')
+    await interaction.response.send_message(" Cleared the queue")
 
 @bot.slash_command(description='Pause playback')
 async def pause(interaction: nextcord.Interaction):
@@ -504,6 +597,8 @@ async def playback_loop(interaction: nextcord.Interaction | None = None):
                     options=ffmpeg_options(),
                 )
                 vc.play(src, after=lambda _: player.play_next.set())
+                if player.paused_pos is not None:
+                    vc.pause()
                 if interaction:
                     await interaction.followup.send(f" Now playing **{song.title}**")
             except Exception as e:
@@ -524,6 +619,8 @@ async def playback_loop(interaction: nextcord.Interaction | None = None):
                     )
                     player.play_next.clear()
                     vc.play(src, after=lambda _: player.play_next.set())
+                    if player.paused_pos is not None:
+                        vc.pause()
                 except Exception as e:
                     log.error(f'Seek error: {e}')
                     player.play_next.set()
@@ -586,6 +683,11 @@ def start_http_server():
             elif cmd == 'add' and 'query' in params:
                 q = params['query'][0]
                 asyncio.run_coroutine_threadsafe(add_and_play(q), bot.loop)
+            elif cmd == 'playlist' and 'url' in params:
+                url = params['url'][0]
+                asyncio.run_coroutine_threadsafe(add_playlist_and_play(url), bot.loop)
+            elif cmd == 'remove_playlist':
+                asyncio.run_coroutine_threadsafe(remove_last_playlist(), bot.loop)
             elif cmd == 'remove' and 'pos' in params:
                 try:
                     pos = int(params['pos'][0]) - 1
@@ -621,8 +723,10 @@ def start_http_server():
                 'loop': player.loop,
                 'loop_queue': player.loop_queue,
                 'duration': player.current.duration if player.current else 0,
-                'position': time.time() - player.start_time if player.current else 0,
+                'position': (player.paused_pos if player.paused_pos is not None
+                            else (time.time() - player.start_time if player.current else 0)),
                 'volume': int(player.volume * 100),
+                'paused': bool(player.voice_client.is_paused()) if player.voice_client else False,
             }
             resp['downloads'] = {
                 q: int((datetime.now() - t).total_seconds())

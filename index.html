@@ -69,6 +69,7 @@
     }
     .yt-btn:hover{background:var(--yt-surface-hover);}
     .yt-btn:active{background:var(--yt-accent);color:#fff;}
+    .yt-btn.toggled{background:var(--yt-accent);color:#fff;}
 
     /* INPUTS */
     .yt-input{
@@ -142,18 +143,25 @@
   <main>
     <!-- TOP CONTROLS -->
     <div class="control-row">
-      <button class="yt-btn" onclick="api('skip')"><span class="material-icons-outlined">skip_next</span>Skip</button>
-      <button class="yt-btn" onclick="api('pause')"><span class="material-icons-outlined">pause</span>Pause</button>
-      <button class="yt-btn" onclick="api('resume')"><span class="material-icons-outlined">play_arrow</span>Resume</button>
+      <button class="yt-btn" id="skipBtn" onclick="api('skip')"><span class="material-icons-outlined">skip_next</span>Skip</button>
+      <button class="yt-btn" id="pauseBtn" onclick="api('pause')"><span class="material-icons-outlined">pause</span>Pause</button>
+      <button class="yt-btn" id="resumeBtn" onclick="api('resume')"><span class="material-icons-outlined">play_arrow</span>Resume</button>
       <button class="yt-btn" onclick="api('clear')">Clear Queue</button>
-      <button class="yt-btn" onclick="api('loop')">Loop Song</button>
-      <button class="yt-btn" onclick="api('loopqueue')">Loop Queue</button>
+      <button class="yt-btn" id="loopBtn" onclick="api('loop')">Loop Song</button>
+      <button class="yt-btn" id="loopQueueBtn" onclick="api('loopqueue')">Loop Queue</button>
     </div>
 
     <!-- ADD SONG -->
     <div class="control-row">
       <input id="query" class="yt-input" placeholder="YouTube link or search term">
       <button class="yt-btn" onclick="addSong()">Add</button>
+    </div>
+
+    <!-- ADD PLAYLIST -->
+    <div class="control-row">
+      <input id="plist" class="yt-input" placeholder="Playlist URL">
+      <button class="yt-btn" onclick="addPlaylist()">Add Playlist</button>
+      <button class="yt-btn" onclick="removePlaylist()">Remove Playlist Songs</button>
     </div>
 
     <!-- JOIN CHANNEL -->
@@ -180,6 +188,10 @@
     let auth = localStorage.getItem('auth') || '';
     const showLogin = (show=true)=>document.getElementById('login').style.display = show ? 'flex' : 'none';
 
+    // track slider interactions so periodic updates don't fight with the user
+    let seeking=false, pendingSeek=0;
+    let adjustingVol=false, pendingVol=100;
+
     function doLogin(){
       const u=document.getElementById('user').value;
       const p=document.getElementById('pass').value;
@@ -200,6 +212,15 @@
       if(!q)return;
       api('add','?query='+encodeURIComponent(q));
       document.getElementById('query').value='';
+    }
+    function addPlaylist(){
+      const u=document.getElementById('plist').value.trim();
+      if(!u)return;
+      api('playlist','?url='+encodeURIComponent(u));
+      document.getElementById('plist').value='';
+    }
+    function removePlaylist(){
+      api('remove_playlist');
     }
     function removeSong(i){api('remove','?pos='+i);}
 
@@ -235,31 +256,51 @@
       /* Status */
       const dls=Object.entries(data.downloads).map(([q,s])=>`${q} (${s}s)`).join('<br>');
       document.getElementById('status').innerHTML=
-        `Playing: <strong>${data.current||'none'}</strong><br>`+
+        `Playing: <strong>${data.current||'none'}</strong>${data.paused?' (Paused)':''}<br>`+
         `Voice: ${data.connected||'none'}<br>`+
         `Downloading:<br>${dls||'none'}`;
+
+      document.getElementById('loopBtn').classList.toggle('toggled',data.loop);
+      document.getElementById('loopQueueBtn').classList.toggle('toggled',data.loop_queue);
+      document.getElementById('pauseBtn').disabled=data.paused||!data.current;
+      document.getElementById('resumeBtn').disabled=!data.paused||!data.current;
 
       /* Progress */
       const prog=document.getElementById('progress');
       const vol=document.getElementById('volume');
       const time=document.getElementById('time');
       prog.max=Math.floor(data.duration||0);
-      prog.value=Math.floor(data.position||0);
-      vol.value=data.volume||100;
+      if(!seeking){
+        prog.value=Math.floor(data.position||0);
+      }
+      if(!adjustingVol){
+        vol.value=data.volume||100;
+      }
       const fmt=t=>{const m=Math.floor(t/60),s=Math.floor(t%60).toString().padStart(2,'0');return `${m}:${s}`;};
-      time.textContent=`${fmt(data.position)} / ${fmt(data.duration)}`;
+      if(!seeking){
+        time.textContent=`${fmt(data.position)} / ${fmt(data.duration)}`;
+      }
     }
 
     function joinChannel(){
       const id=document.getElementById('channels').value;
       if(id) api('join','?channel='+id);
     }
-    document.getElementById('progress').addEventListener('change',e=>{
-      api('seek','?pos='+e.target.value);
-    });
-    document.getElementById('volume').addEventListener('change',e=>{
-      api('volume','?level='+e.target.value);
-    });
+    const prog=document.getElementById('progress');
+    const vol=document.getElementById('volume');
+
+    const endSeek=()=>{if(seeking){seeking=false;api('seek','?pos='+pendingSeek);}};
+    const endVol=()=>{if(adjustingVol){adjustingVol=false;api('volume','?level='+pendingVol);}};
+
+    prog.addEventListener('input',e=>{seeking=true;pendingSeek=e.target.value;});
+    prog.addEventListener('change',endSeek);
+    prog.addEventListener('mouseup',endSeek);
+    prog.addEventListener('touchend',endSeek);
+
+    vol.addEventListener('input',e=>{adjustingVol=true;pendingVol=e.target.value;});
+    vol.addEventListener('change',endVol);
+    vol.addEventListener('mouseup',endVol);
+    vol.addEventListener('touchend',endVol);
 
     loadQueue();setInterval(loadQueue,1000);
   </script>
