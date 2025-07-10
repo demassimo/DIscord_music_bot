@@ -430,6 +430,9 @@ async def playback_loop(interaction: nextcord.Interaction | None = None):
                 break
             player.play_next.clear()
             if not player.queue:
+                if player.current and not vc.is_playing():
+                    player.current = None
+                    player.start_time = 0.0
                 await asyncio.sleep(1)
                 continue
             song = player.queue.pop(0)
@@ -540,7 +543,9 @@ def start_http_server():
                     pass
             elif cmd == 'seek' and 'pos' in params:
                 try:
-                    player.seek_pos = float(params['pos'][0])
+                    pos = float(params['pos'][0])
+                    player.seek_pos = pos
+                    player.start_time = time.time() - pos
                     if player.voice_client:
                         player.voice_client.stop()
                 except Exception:
