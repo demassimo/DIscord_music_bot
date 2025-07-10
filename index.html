@@ -165,6 +165,7 @@
     <!-- STATUS & PROGRESS -->
     <div id="status"></div>
     <input type="range" id="progress" value="0" min="0" max="0" step="1">
+    <input type="range" id="volume" value="100" min="0" max="100" step="1">
     <div style="text-align:right;font-size:.85rem;color:var(--yt-secondary);margin-bottom:1rem;">
       <span id="time">0:00 / 0:00</span>
     </div>
@@ -240,9 +241,11 @@
 
       /* Progress */
       const prog=document.getElementById('progress');
+      const vol=document.getElementById('volume');
       const time=document.getElementById('time');
       prog.max=Math.floor(data.duration||0);
       prog.value=Math.floor(data.position||0);
+      vol.value=data.volume||100;
       const fmt=t=>{const m=Math.floor(t/60),s=Math.floor(t%60).toString().padStart(2,'0');return `${m}:${s}`;};
       time.textContent=`${fmt(data.position)} / ${fmt(data.duration)}`;
     }
@@ -253,6 +256,9 @@
     }
     document.getElementById('progress').addEventListener('change',e=>{
       api('seek','?pos='+e.target.value);
+    });
+    document.getElementById('volume').addEventListener('change',e=>{
+      api('volume','?level='+e.target.value);
     });
 
     loadQueue();setInterval(loadQueue,1000);

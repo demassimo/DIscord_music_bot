@@ -12,8 +12,10 @@ This bot uses Nextcord application commands to play music from YouTube, YouTube 
 - `/loop` – toggle loop mode for the current song
 - `/back` – replay the previous song
 - `/queue` – display queued tracks
+- `/volume <0-100>` – set playback volume
 - The bot speaks events like downloads and currently playing tracks using TTS
 - **Show Queue** context command via the Apps menu when right clicking the bot
+- Downloads are aborted if they take too long (30s for YouTube, 5m for Spotify)
 
 Audio is streamed at the connected channel's bitrate (clamped to 384 kb/s) or
 a default of 128 kb/s for higher quality.
@@ -37,5 +39,6 @@ After a song finishes playing it is removed from disk. The queue is limited to 1
    A sample `discord_music_bot.service` is provided for running with `systemctl`.
 
 The bot exposes an HTTP control server on port `8080` by default. Browse to `http://localhost:8080/` for a small control page. Set `HTTP_CONTROL_PORT` to change the port.
+The page includes a progress and volume slider for seeking and adjusting playback volume.
 
 Spotify downloads require a configured `spotdl` installation and may need Spotify credentials. See [spotdl documentation](https://github.com/spotDL/spotify-downloader) for setup details.
