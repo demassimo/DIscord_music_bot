@@ -74,6 +74,7 @@ class MusicPlayer:
         self.start_time: float = 0.0
         self.seek_pos: float | None = None
         self.volume: float = 1.0
+        self.lock = asyncio.Lock()
 
     async def add_song(self, query: str) -> Song:
         if len(self.queue) >= 10:
@@ -310,6 +311,27 @@ async def remove_at(index: int):
     except Exception:
         pass
 
+async def set_volume(level: int):
+    """Safely adjust playback volume from within the event loop."""
+    level = max(0, min(level, 100))
+    async with player.lock:
+        player.volume = level / 100
+        vc = player.voice_client
+        if vc and player.current and vc.is_playing():
+            player.seek_pos = time.time() - player.start_time
+            vc.stop()
+
+async def seek_to(position: float):
+    """Safely seek to a position in the current song."""
+    if position < 0:
+        position = 0
+    async with player.lock:
+        player.seek_pos = position
+        player.start_time = time.time() - position
+        vc = player.voice_client
+        if vc and vc.is_playing():
+            vc.stop()
+
 # ---- Slash commands ----
 @bot.slash_command(description='Join your voice channel')
 async def join(interaction: nextcord.Interaction):
@@ -433,12 +455,8 @@ async def show_queue(interaction: nextcord.Interaction):
 
 @bot.slash_command(description='Set playback volume (0-100)')
 async def volume(interaction: nextcord.Interaction, level: int):
-    level = max(0, min(level, 100))
-    player.volume = level / 100
-    await interaction.response.send_message(f" Volume set to {level}%")
-    if player.voice_client and player.current and player.voice_client.is_playing():
-        player.seek_pos = time.time() - player.start_time
-        player.voice_client.stop()
+    await set_volume(level)
+    await interaction.response.send_message(f" Volume set to {max(0, min(level, 100))}%")
 
 @bot.slash_command(description='Show status')
 async def status(interaction: nextcord.Interaction):
@@ -583,20 +601,13 @@ def start_http_server():
             elif cmd == 'seek' and 'pos' in params:
                 try:
                     pos = float(params['pos'][0])
-                    player.seek_pos = pos
-                    player.start_time = time.time() - pos
-                    if player.voice_client:
-                        player.voice_client.stop()
+                    asyncio.run_coroutine_threadsafe(seek_to(pos), bot.loop)
                 except Exception:
                     pass
             elif cmd == 'volume' and 'level' in params:
                 try:
                     lvl = int(params['level'][0])
-                    lvl = max(0, min(lvl, 100))
-                    player.volume = lvl / 100
-                    if player.voice_client and player.current and player.voice_client.is_playing():
-                        player.seek_pos = time.time() - player.start_time
-                        player.voice_client.stop()
+                    asyncio.run_coroutine_threadsafe(set_volume(lvl), bot.loop)
                 except Exception:
                     pass
             elif cmd == 'queue':
