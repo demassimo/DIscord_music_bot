@@ -1,6 +1,6 @@
 # Discord Music Bot
 
-This bot uses Nextcord application commands to play music from YouTube, YouTube Music, and Spotify. Songs and playlists are downloaded with `yt-dlp` and `spotdl`. Commands can also be issued over a simple HTTP endpoint. A minimal web page is served directly from the bot for basic control.
+This bot uses **discord.py** application commands to play music from YouTube, YouTube Music, and Spotify. Songs and playlists are downloaded with `yt-dlp` and `spotdl`. Commands can also be issued over a simple HTTP endpoint. A minimal web page is served directly from the bot for basic control.
 
 ## Features
 
@@ -27,7 +27,7 @@ After a song finishes playing it is removed from disk. The queue is limited to 1
 
 1. Install dependencies:
    ```bash
-   pip install nextcord yt-dlp spotdl gtts
+   pip install discord.py yt-dlp spotdl gtts
    ```
    The bot also requires `ffmpeg` installed on the system.
 2. Set the `DISCORD_TOKEN` environment variable with your bot token.
