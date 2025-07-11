@@ -14,12 +14,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 import urllib.parse
 
-import nextcord
-from nextcord.ext import commands, tasks
+import discord
+from discord.ext import commands, tasks
 import yt_dlp
 from gtts import gTTS
 from shutil import which
-import ctypes.util, nextcord, sys
+import ctypes.util, discord, sys
 
 
 lib = ctypes.util.find_library("opus")           # asks ldconfig where libopus lives
@@ -30,9 +30,12 @@ if not lib:                                      # None  package not installed
     )
     sys.exit(1)
 
-nextcord.opus.load_opus(lib)
-if nextcord.opus.is_loaded():
-    nextcord.opus.set_opus_application(nextcord.opus.APPLICATION_AUDIO)
+discord.opus.load_opus(lib)
+if not discord.opus.is_loaded():
+    sys.stderr.write(
+        "Failed to load opus library. Install libopus0 (Debian/Ubuntu) or opus (Fedora/RHEL)\n"
+    )
+    sys.exit(1)
 reconnect = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 
 # ---- Configuration ----
@@ -71,7 +74,7 @@ if not which('spotdl'):
     log.warning("spotdl not found; Spotify support will not work")
 
 # ---- Bot setup ----
-intents = nextcord.Intents.default()
+intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
@@ -96,7 +99,7 @@ class MusicPlayer:
         self.loop = False
         self.loop_queue = False
         self.play_next = asyncio.Event()
-        self.voice_client: nextcord.VoiceClient | None = None
+        self.voice_client: discord.VoiceClient | None = None
         self.current: Song | None = None
         self.start_time: float = 0.0
         self.seek_pos: float | None = None
@@ -210,7 +213,7 @@ async def join_channel(channel_id: int):
         return
     guild = bot.guilds[0]
     channel = guild.get_channel(channel_id)
-    if not isinstance(channel, nextcord.VoiceChannel):
+    if not isinstance(channel, discord.VoiceChannel):
         return
     vc = guild.voice_client
     if vc and vc.is_connected():
@@ -243,7 +246,7 @@ async def speak(text: str):
     log.debug("FFMPEG OPTS  %s", " ".join(opts))   #  add this
     reconnect = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 
-    src = await nextcord.FFmpegOpusAudio.from_probe(
+    src = await discord.FFmpegOpusAudio.from_probe(
         tts_mp3,                        # or song.filepath
         options="-vn -sn"      # nothing that would force re-encode
     )
@@ -378,7 +381,7 @@ async def download_audio(query: str) -> Song:
 
 
 # ---- Voice helper ----
-async def ensure_voice(interaction: nextcord.Interaction) -> nextcord.VoiceClient:
+async def ensure_voice(interaction: discord.Interaction) -> discord.VoiceClient:
     vc = interaction.guild.voice_client
     if vc and vc.is_connected():
         player.voice_client = vc
@@ -467,16 +470,16 @@ async def seek_to(position: float):
             vc.stop()
 
 # ---- Slash commands ----
-@bot.slash_command(description='Join your voice channel')
-async def join(interaction: nextcord.Interaction):
+@bot.tree.command(name='join', description='Join your voice channel')
+async def join(interaction: discord.Interaction):
     try:
         vc = await ensure_voice(interaction)
         await interaction.response.send_message(f" Joined **{vc.channel.name}**")
     except Exception as e:
         await interaction.response.send_message(str(e), ephemeral=True)
 
-@bot.slash_command(description='Leave the voice channel')
-async def leave(interaction: nextcord.Interaction):
+@bot.tree.command(name='leave', description='Leave the voice channel')
+async def leave(interaction: discord.Interaction):
     vc = interaction.guild.voice_client
     if vc and vc.is_connected():
         await vc.disconnect()
@@ -487,8 +490,8 @@ async def leave(interaction: nextcord.Interaction):
     else:
         await interaction.response.send_message("Not in a voice channel", ephemeral=True)
 
-@bot.slash_command(description='Play a song or playlist')
-async def play(interaction: nextcord.Interaction, query: str):
+@bot.tree.command(name='play', description='Play a song or playlist')
+async def play(interaction: discord.Interaction, query: str):
     await interaction.response.defer()
     try:
         await ensure_voice(interaction)
@@ -535,8 +538,8 @@ async def play(interaction: nextcord.Interaction, query: str):
     except Exception as e:
         await interaction.followup.send(str(e), ephemeral=True)
 
-@bot.slash_command(description='Add all songs from a playlist')
-async def playlist(interaction: nextcord.Interaction, url: str):
+@bot.tree.command(name='playlist', description='Add all songs from a playlist')
+async def playlist(interaction: discord.Interaction, url: str):
     await interaction.response.defer()
     try:
         await ensure_voice(interaction)
@@ -550,48 +553,48 @@ async def playlist(interaction: nextcord.Interaction, url: str):
     except Exception as e:
         await interaction.followup.send(str(e), ephemeral=True)
 
-@bot.slash_command(description='Remove songs added by the last playlist command')
-async def remove_playlist(interaction: nextcord.Interaction):
+@bot.tree.command(name='remove_playlist', description='Remove songs added by the last playlist command')
+async def remove_playlist(interaction: discord.Interaction):
     removed = await remove_last_playlist()
     await interaction.response.send_message(f" Removed {removed} playlist songs")
 
-@bot.slash_command(description='Skip the current song')
-async def skip(interaction: nextcord.Interaction):
+@bot.tree.command(name='skip', description='Skip the current song')
+async def skip(interaction: discord.Interaction):
     await handle_command('skip')
     await interaction.response.send_message(" Skipped")
 
-@bot.slash_command(description='Stop playback')
-async def stop(interaction: nextcord.Interaction):
+@bot.tree.command(name='stop', description='Stop playback')
+async def stop(interaction: discord.Interaction):
     await handle_command('stop')
     await interaction.response.send_message(" Stopped playback")
 
-@bot.slash_command(description='Clear the queue')
-async def clear(interaction: nextcord.Interaction):
+@bot.tree.command(name='clear', description='Clear the queue')
+async def clear(interaction: discord.Interaction):
     await handle_command('clear')
     await interaction.response.send_message(" Cleared the queue")
 
-@bot.slash_command(description='Pause playback')
-async def pause(interaction: nextcord.Interaction):
+@bot.tree.command(name='pause', description='Pause playback')
+async def pause(interaction: discord.Interaction):
     await handle_command('pause')
     await interaction.response.send_message(" Paused playback")
 
-@bot.slash_command(description='Resume playback')
-async def resume(interaction: nextcord.Interaction):
+@bot.tree.command(name='resume', description='Resume playback')
+async def resume(interaction: discord.Interaction):
     await handle_command('resume')
     await interaction.response.send_message(" Resumed playback")
 
-@bot.slash_command(description='Toggle loop mode')
-async def loop(interaction: nextcord.Interaction):
+@bot.tree.command(name='loop', description='Toggle loop mode')
+async def loop(interaction: discord.Interaction):
     player.loop = not player.loop
     await interaction.response.send_message(f" Loop is now **{'on' if player.loop else 'off'}**")
 
-@bot.slash_command(description='Toggle queue loop mode')
-async def loopqueue(interaction: nextcord.Interaction):
+@bot.tree.command(name='loopqueue', description='Toggle queue loop mode')
+async def loopqueue(interaction: discord.Interaction):
     player.loop_queue = not player.loop_queue
     await interaction.response.send_message(f" Queue loop is now **{'on' if player.loop_queue else 'off'}**")
 
-@bot.slash_command(description='Replay the previous song')
-async def back(interaction: nextcord.Interaction):
+@bot.tree.command(name='back', description='Replay the previous song')
+async def back(interaction: discord.Interaction):
     if len(player.history) < 2:
         return await interaction.response.send_message("No previous song", ephemeral=True)
     prev = player.history[-2]
@@ -605,20 +608,20 @@ async def back(interaction: nextcord.Interaction):
     if vc and (not playback_task or playback_task.done()):
         playback_task = bot.loop.create_task(playback_loop(interaction))
 
-@bot.slash_command(description='Show the queue')
-async def show_queue(interaction: nextcord.Interaction):
+@bot.tree.command(name='queue', description='Show the queue')
+async def show_queue(interaction: discord.Interaction):
     if not player.queue:
         return await interaction.response.send_message("The queue is empty", ephemeral=True)
     listing = "\n".join(f"{i+1}. {s.title}" for i, s in enumerate(player.queue))
     await interaction.response.send_message(f" Queue:\n{listing}")
 
-@bot.slash_command(description='Set playback volume (0-100)')
-async def volume(interaction: nextcord.Interaction, level: int):
+@bot.tree.command(name='volume', description='Set playback volume (0-100)')
+async def volume(interaction: discord.Interaction, level: int):
     await set_volume(level)
     await interaction.response.send_message(f" Volume set to {max(0, min(level, 100))}%")
 
-@bot.slash_command(description='Show status')
-async def status(interaction: nextcord.Interaction):
+@bot.tree.command(name='status', description='Show status')
+async def status(interaction: discord.Interaction):
     lines = [
         f" Currently playing: {player.current.title if player.current else 'none'}",
         f" Queue length: {len(player.queue)}"
@@ -633,7 +636,7 @@ async def status(interaction: nextcord.Interaction):
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 # ---- Playback loop ----
-async def playback_loop(interaction: nextcord.Interaction | None = None):
+async def playback_loop(interaction: discord.Interaction | None = None):
     global playback_task
     vc = player.voice_client
     if not vc:
@@ -659,7 +662,7 @@ async def playback_loop(interaction: nextcord.Interaction | None = None):
                 bit = channel_bitrate()
                 opts = ffmpeg_options(channel_bitrate())
                 log.debug("FFMPEG OPTS  %s", " ".join(opts))   #  add this
-                src = await nextcord.FFmpegOpusAudio.from_probe(
+                src = await discord.FFmpegOpusAudio.from_probe(
                     song.filepath,
                     options="-vn -sn"
                 )
@@ -681,7 +684,7 @@ async def playback_loop(interaction: nextcord.Interaction | None = None):
                     opts = ffmpeg_options(channel_bitrate())
                     log.debug("FFMPEG OPTS  %s", " ".join(opts))   #  add this
 
-                    src = await nextcord.FFmpegOpusAudio.from_probe(
+                    src = await discord.FFmpegOpusAudio.from_probe(
                         song.filepath,
                         before_options=f' -ss {pos}',
                         options="-vn -sn"     # audio-only, no extra filters
@@ -818,10 +821,11 @@ def start_http_server():
 @bot.event
 async def on_ready():
     log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    await bot.tree.sync()
     periodic_cleanup.start()
 
-@bot.event
-async def on_application_command_error(interaction, error):
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error):
     log.error(f"Error in {interaction.command.name}: {error}")
     if isinstance(error, RuntimeError):
         await interaction.response.send_message(str(error), ephemeral=True)
