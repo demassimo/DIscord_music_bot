@@ -19,12 +19,38 @@ from nextcord.ext import commands, tasks
 import yt_dlp
 from gtts import gTTS
 from shutil import which
+import ctypes.util, nextcord, sys
+
+
+lib = ctypes.util.find_library("opus")           # asks ldconfig where libopus lives
+if not lib:                                      # None  package not installed
+    sys.stderr.write(
+        "libopus not found. sudo apt-get install libopus0 (Debian/Ubuntu) "
+        "or sudo dnf install opus (Fedora/RHEL)\n"
+    )
+    sys.exit(1)
+
+nextcord.opus.load_opus(lib)
+if nextcord.opus.is_loaded():
+    nextcord.opus.set_opus_application(nextcord.opus.APPLICATION_AUDIO)
+reconnect = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 
 # ---- Configuration ----
 DOWNLOAD_DIR = os.environ.get(
     'DOWNLOAD_DIR',
     '/home/masscom4/domains/musicbot.masscomputing.co.za/downloads'
 )
+DEBUG_ARCHIVE = True           #  flip to False to disable all copying
+
+# where we keep the permanent copies
+if DEBUG_ARCHIVE:
+    ARCHIVE_ROOT = os.path.join(DOWNLOAD_DIR, "_archive")
+    RAW_DIR      = os.path.join(ARCHIVE_ROOT, "raw")   # bit-perfect from yt-dl/spotDL
+    ENC_DIR      = os.path.join(ARCHIVE_ROOT, "enc")   # single ffmpeg encode
+    os.makedirs(RAW_DIR, exist_ok=True)
+    os.makedirs(ENC_DIR, exist_ok=True)
+# -------------------------------------------------------------------
+
 HTTP_CONTROL_PORT = int(os.environ.get('HTTP_CONTROL_PORT', '8080'))
 FILE_RETENTION_HOURS = int(os.environ.get('FILE_RETENTION_HOURS', '24'))
 AUTH_USER = os.environ.get('HTTP_AUTH_USER', 'admin')
@@ -32,7 +58,7 @@ AUTH_PASS = os.environ.get('HTTP_AUTH_PASS', 'secret')
 
 # ---- Logging ----
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='[%(asctime)s] %(levelname)s:%(name)s: %(message)s'
 )
 log = logging.getLogger('musicbot')
@@ -157,23 +183,19 @@ def channel_bitrate() -> int:
         try:
             # Discord allows up to 384 kb/s for boosted servers.
             # Convert the channel bitrate from bps to kbps and clamp it.
-            return max(32, min(vc.channel.bitrate // 1000, 384))
+            return max(94, min(vc.channel.bitrate // 1000, 384))
         except Exception:
             pass
     # Default to a higher quality bitrate when the channel doesn't report one
     return 128
 
-def ffmpeg_options() -> str:
-    """Return common ffmpeg options with current volume."""
-    opts = [
-        '-application', 'audio',
-        '-compression_level', '10',
-        '-vbr', 'on',
-        '-frame_duration', '20',
+def ffmpeg_options(room_kbps: int) -> list[str]:
+    return [
+        "-vn", "-sn",                   # audio-only
+        #"-af",  "loudnorm=I=-16:TP=-1.5:LRA=7",  # gentle LUFS normalise
+        "-vbr", "constrained",          # CVBR survives Discord re-muxing better
+        #"-application", "audio",        # duplicate-safe but explicit
     ]
-    if player.volume != 1.0:
-        opts += ['-filter:a', f'volume={player.volume}']
-    return ' '.join(opts)
 
 # ---- Voice channel helpers ----
 def list_voice_channels() -> dict[int, str]:
@@ -217,10 +239,13 @@ async def speak(text: str):
         return
     done = asyncio.Event()
     bit = channel_bitrate()
-    src = nextcord.FFmpegOpusAudio(
-        tts_mp3,
-        bitrate=bit,
-        options=ffmpeg_options(),
+    opts = ffmpeg_options(channel_bitrate())
+    log.debug("FFMPEG OPTS  %s", " ".join(opts))   #  add this
+    reconnect = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+
+    src = await nextcord.FFmpegOpusAudio.from_probe(
+        tts_mp3,                        # or song.filepath
+        options="-vn -sn"      # nothing that would force re-encode
     )
     vc.play(src, after=lambda _: done.set())
     await done.wait()
@@ -243,14 +268,23 @@ def get_audio_duration(path: str) -> float:
         return 0.0
 
 async def download_audio(query: str) -> Song:
+    """
+    Download a track (YouTube or Spotify), optionally copy the *raw*
+    file and a *single-pass* Opus encode into the _archive/ tree, and
+    return the Song pointing at the working copy inside DOWNLOAD_DIR.
+    """
+    import shutil                                    # new
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     downloads_in_progress[query] = datetime.now()
+
     try:
-        # Spotify track
+        # ------------------------------------------------------------
+        # 1) SPOTIFY (spotDL)
+        # ------------------------------------------------------------
         if re.search(r'https?://(?:open\.)?spotify\.com/track/', query):
-            template = f"{uuid.uuid4()}.%(ext)s"
-            outfile = os.path.join(DOWNLOAD_DIR, template)
-            proc = await asyncio.create_subprocess_exec(
+            template  = f"{uuid.uuid4()}.%(ext)s"
+            outfile   = os.path.join(DOWNLOAD_DIR, template)
+            proc      = await asyncio.create_subprocess_exec(
                 'spotdl', query, '--output', outfile,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL
@@ -258,58 +292,90 @@ async def download_audio(query: str) -> Song:
             try:
                 await asyncio.wait_for(proc.communicate(), timeout=300)
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.communicate()
-                raise RuntimeError('Spotify download timed out')
-            prefix = os.path.basename(outfile).split('%')[0]
-            entries = [fn for fn in os.listdir(DOWNLOAD_DIR) if fn.startswith(prefix)]
-            if not entries:
-                raise RuntimeError("spotdl finished but no file found")
-            entry = entries[0]
+                proc.kill(); await proc.communicate()
+                raise RuntimeError("Spotify download timed out")
+
+            prefix  = os.path.basename(outfile).split('%')[0]
+            entry   = next((x for x in os.listdir(DOWNLOAD_DIR) if x.startswith(prefix)), None)
+            if not entry:
+                raise RuntimeError("spotDL finished but produced no file")
+
             path = os.path.join(DOWNLOAD_DIR, entry)
-            if os.path.isdir(path):
+            if os.path.isdir(path):                           # spotDL sometimes makes a folder
                 for root, _, files in os.walk(path):
                     for f in files:
                         if f.lower().endswith(('.mp3','.m4a','.flac','.wav','.opus','.ogg')):
-                            dur = get_audio_duration(os.path.join(root, f))
-                            return Song(os.path.splitext(f)[0], os.path.join(root, f), query, dur)
-                raise RuntimeError("spotdl created directory but no audio inside")
-            return Song(os.path.splitext(entry)[0], path, query, get_audio_duration(path))
-
-        # YouTube/other via yt-dlp CLI with timeout
-        cmd = [
-            'yt-dlp', '--print-json', '-f', 'bestaudio/best',
-            '-o', os.path.join(DOWNLOAD_DIR, '%(id)s.%(ext)s'), query
-        ]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL
-        )
-        try:
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            raise RuntimeError('YouTube download timed out')
-        try:
-            info = json.loads(out.decode().splitlines()[-1])
-        except Exception:
-            raise RuntimeError('yt-dlp did not return JSON')
-        file_id = info.get('id')
-        ext = info.get('ext')
-        title = info.get('title', 'Unknown')
-        duration = info.get('duration') or 0
-        if not file_id or not ext:
-            raise RuntimeError('yt-dlp did not return valid id/ext')
-        path = os.path.join(DOWNLOAD_DIR, f"{file_id}.{ext}")
-        if not os.path.isfile(path):
-            raise RuntimeError('yt-dlp finished but file not found on disk')
-        if not duration:
+                            path = os.path.join(root, f); break
+            title = os.path.splitext(os.path.basename(path))[0]
             duration = get_audio_duration(path)
+
+        # ------------------------------------------------------------
+        # 2) YOUTUBE (yt-dlp)
+        # ------------------------------------------------------------
+        else:
+            cmd = [
+                'yt-dlp', '--print-json', '-f', 'bestaudio/best',
+                '-o', os.path.join(DOWNLOAD_DIR, '%(id)s.%(ext)s'), query
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL)
+            try:
+                out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+            except asyncio.TimeoutError:
+                proc.kill(); await proc.communicate()
+                raise RuntimeError("YouTube download timed out")
+
+            try:
+                info = json.loads(out.decode().splitlines()[-1])
+            except Exception:
+                raise RuntimeError("yt-dlp did not return JSON")
+
+            file_id  = info.get('id');     ext = info.get('ext')
+            title    = info.get('title', 'Unknown')
+            duration = info.get('duration') or 0
+            if not file_id or not ext:
+                raise RuntimeError("yt-dlp returned incomplete data")
+
+            path = os.path.join(DOWNLOAD_DIR, f"{file_id}.{ext}")
+            if not os.path.isfile(path):
+                raise RuntimeError("yt-dlp finished but file is missing")
+            if not duration:
+                duration = get_audio_duration(path)
+
+        # ----------------------------------------------------------------
+        # DEBUG / ARCHIVE    keep both *raw* and *encoded* snapshots
+        # ----------------------------------------------------------------
+        if DEBUG_ARCHIVE:
+            basename = os.path.splitext(os.path.basename(path))[0]
+
+            # 1) raw copy (identical bytes)
+            raw_copy = os.path.join(RAW_DIR, os.path.basename(path))
+            if not os.path.isfile(raw_copy):
+                shutil.copy2(path, raw_copy)
+
+            # 2) single-pass Opus encode at 128k (if not already Opus)
+            enc_copy = os.path.join(ENC_DIR, f"{basename}.opus")
+            if not os.path.isfile(enc_copy):
+                # if the source **is already** Opus we just duplicate it
+                if path.lower().endswith('.opus') or info.get("acodec") == "opus":
+                    shutil.copy2(path, enc_copy)
+                else:
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-i", path,
+                         "-c:a", "libopus", "-b:a", "128k",
+                         "-vn", "-sn", enc_copy],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=True
+                    )
+
+        # The bot itself keeps using the WORKING copy inside DOWNLOAD_DIR
         return Song(title, path, query, duration)
+
     finally:
         downloads_in_progress.pop(query, None)
+
 
 # ---- Voice helper ----
 async def ensure_voice(interaction: nextcord.Interaction) -> nextcord.VoiceClient:
@@ -591,10 +657,11 @@ async def playback_loop(interaction: nextcord.Interaction | None = None):
             try:
                 await speak(f"Now playing {song.title}")
                 bit = channel_bitrate()
-                src = nextcord.FFmpegOpusAudio(
+                opts = ffmpeg_options(channel_bitrate())
+                log.debug("FFMPEG OPTS  %s", " ".join(opts))   #  add this
+                src = await nextcord.FFmpegOpusAudio.from_probe(
                     song.filepath,
-                    bitrate=bit,
-                    options=ffmpeg_options(),
+                    options="-vn -sn"
                 )
                 vc.play(src, after=lambda _: player.play_next.set())
                 if player.paused_pos is not None:
@@ -611,11 +678,13 @@ async def playback_loop(interaction: nextcord.Interaction | None = None):
                 player.start_time = time.time() - pos
                 try:
                     bit = channel_bitrate()
-                    src = nextcord.FFmpegOpusAudio(
+                    opts = ffmpeg_options(channel_bitrate())
+                    log.debug("FFMPEG OPTS  %s", " ".join(opts))   #  add this
+
+                    src = await nextcord.FFmpegOpusAudio.from_probe(
                         song.filepath,
-                        bitrate=bit,
-                        before_options=f'-ss {pos}',
-                        options=ffmpeg_options(),
+                        before_options=f' -ss {pos}',
+                        options="-vn -sn"     # audio-only, no extra filters
                     )
                     player.play_next.clear()
                     vc.play(src, after=lambda _: player.play_next.set())
@@ -776,7 +845,7 @@ async def periodic_cleanup():
 if __name__ == '__main__':
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     start_http_server()
-    token = os.environ.get('DISCORD_TOKEN', '')
+    token = os.environ.get('DISCORD_TOKEN', 'discordtoken')
     if not token:
         log.error('DISCORD_TOKEN not set'); sys.exit(1)
     bot.run(token)
